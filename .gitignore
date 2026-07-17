@@ -1,0 +1,11 @@
+RavenDB/
+RavenData/
+FlameGraph/
+*.tgz
+*.tar.bz2
+*.tar.gz
+*.data
+*.dump
+*.map
+*.folded
+*.svg
