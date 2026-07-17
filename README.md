@@ -32,6 +32,18 @@ Nothing heavy (DWARF unwind, inject, SVG render) runs on the DB host.
 | `perf` | `perf --version` | `apt-get install linux-tools-$(uname -r)` |
 | `perf_event_paranoid ≤ 1` | `cat /proc/sys/kernel/perf_event_paranoid` | `sudo sysctl kernel.perf_event_paranoid=-1` |
 | `kptr_restrict = 0` | `cat /proc/sys/kernel/kptr_restrict` | `sudo sysctl kernel.kptr_restrict=0` |
+
+`perf_event_paranoid` controls who can use the kernel's performance event subsystem.
+The default on most distros is `2` or `4` (restrict to root only); `perf` needs `≤ 1`
+to sample other processes. Set to `-1` to allow any user to profile any process.
+
+`kptr_restrict` controls whether kernel symbol addresses are exposed in
+`/proc/kallsyms`. At `1` (default) symbol addresses are zeroed out for non-root
+users, so kernel frames in the flamegraph show as hex addresses. Setting it to `0`
+makes the full symbol table visible, giving you readable kernel stack frames
+(`entry_SYSCALL_64`, `futex_wait`, etc.). The `--kallsyms=` snapshot the collector
+captures preserves these symbols for use on the off-box renderer.
+
 | `nc` (for nc transport) | `nc --version` | `apt-get install netcat-openbsd` |
 | `aws` CLI (for S3 transport) | `aws --version` | `snap install aws-cli --classic` |
 
