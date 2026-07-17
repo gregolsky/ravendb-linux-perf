@@ -135,20 +135,18 @@ bash raven-perf-render.sh /tmp/raven-perf-out/raven-perf-*.tgz --open
 
 ```bash
 # Systemd service → send over nc to renderer
-curl -fsSL https://gist.github.com/gregolsky/raven_perf/raw | \
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/raven-perf-collect.sh | \
   sudo bash -s -- --service ravendb --duration 20 --nc renderer-host:9000
 
 # Docker container → send to S3
-curl -fsSL https://gist.github.com/gregolsky/raven_perf/raw | \
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/raven-perf-collect.sh | \
   sudo -E S3_BUCKET=s3://debug-greg/perf-artifacts \
   bash -s -- --docker ravendb --duration 20
 
 # Explicit PID → save locally
-curl -fsSL https://gist.github.com/gregolsky/raven_perf/raw | \
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/raven-perf-collect.sh | \
   sudo bash -s -- --pid 12345 --output /var/tmp/perf-out --nc renderer-host:9000
 ```
-
-`raven-perf-collect.sh` *is* the gist body — publish it to GitHub Gist as-is.
 
 ### Renderer side (nc transport)
 
