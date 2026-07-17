@@ -9,3 +9,8 @@ FlameGraph/
 *.map
 *.folded
 *.svg
+
+# Track committed example outputs
+!examples/
+!examples/*.svg
+!examples/*.txt

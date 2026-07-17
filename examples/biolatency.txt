@@ -1,0 +1,11 @@
+Tracing block device I/O... Hit Ctrl-C to end.
+
+07:55:12
+
+disk = sda
+     msecs               : count     distribution
+         0 -> 1          : 647      |****************************************|
+         2 -> 3          : 9        |                                        |
+         4 -> 7          : 7        |                                        |
+         8 -> 15         : 5        |                                        |
+        16 -> 31         : 5        |                                        |

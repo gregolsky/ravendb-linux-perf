@@ -3,6 +3,9 @@
 Reference for RavenDB operators deciding what to enable in production.
 Everything here applies to any self-contained .NET 6+ application, not just RavenDB.
 
+For the full menu of trace types (on-CPU, off-CPU, I/O, run-queue latency, off-wake)
+and when to use each, see **[TRACING.md](TRACING.md)**.
+
 ---
 
 ## What each knob does
@@ -152,22 +155,25 @@ EventPipe is the wrong tool.
 
 ---
 
-### External sampler: `perf` (what this toolkit uses)
+### External sampler: `perf` (what this toolkit uses for `cpu`, `offcpu`, `io`)
 
 `perf record` is a kernel-side hardware/software counter sampler. It captures raw
 instruction pointers from all frames — managed, native, kernel — and relies on the
 `DOTNET_*` side-channel to turn managed addresses into names.
 
-Best for ad-hoc captures; the `raven-perf-collect.sh` + `raven-perf-render.sh`
+Best for ad-hoc captures; the `perf/raven-perf-collect.sh` + `perf/raven-perf-render.sh`
 split keeps the DB box impact minimal.
+
+For `offcpu` profiling via perf, `kernel.sched_schedstats=1` is required (to
+time-weight stacks by sleep duration via `perf inject -s`).
 
 ---
 
-### External sampler: eBPF continuous profilers (Parca, Pyroscope, `bcc profile`)
+### External sampler: eBPF (bcc-tools, bpftrace — `offcpu`, `io`, `runqlat`, `offwake`)
 
-eBPF profilers run a BPF program in the kernel that fires on timer interrupts,
-captures the full call stack in-kernel, and aggregates it before shipping it to
-userspace. Compared to `perf record`:
+eBPF profilers run a BPF program in the kernel that fires on timer interrupts or
+tracepoints, aggregates data in-kernel, and ships only the summary to userspace.
+Compared to `perf record`:
 
 - **Always-on**: continuous profiling with no manual capture/stop cycle.
 - **Lower overhead**: stacks are aggregated in-kernel; you don't write a large
@@ -175,11 +181,22 @@ userspace. Compared to `perf record`:
 - **Fleet-friendly**: the agent runs as a daemon; data flows to a central backend
   (Parca server, Grafana Pyroscope) where you query over time.
 
-Tools:
-- [Grafana Pyroscope](https://grafana.com/oss/pyroscope/) — pull-based or push-based;
-  Helm chart for Kubernetes.
+This toolkit uses bcc-tools for ad-hoc captures in `ebpf/raven-ebpf-collect.sh`,
+supporting five trace types:
+
+| `--type` | bcc tool(s) | What it produces |
+|---|---|---|
+| `cpu` | `profile` | On-CPU folded stacks |
+| `offcpu` | `offcputime` | Time-weighted blocked-time folded stacks |
+| `offwake` | `offwaketime` | Off-CPU + waker stacks |
+| `io` | `biolatency` + `biosnoop` + `biostacks` + `ext4slower` + `cachestat` + `bitesize` | Block I/O suite |
+| `runqlat` | `runqlat` | Run-queue latency histogram |
+
+For continuous fleet-wide profiling:
+- [Grafana Pyroscope](https://grafana.com/oss/pyroscope/) — pull or push; Helm chart.
 - [Parca](https://www.parca.dev/) — open source, pull-based via parca-agent.
-- `bcc profile` / `bpftrace` — one-shot, good for quick eBPF sampling.
+
+See [TRACING.md](TRACING.md) for descriptions and per-type overhead.
 
 ---
 

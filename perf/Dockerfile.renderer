@@ -1,0 +1,44 @@
+# Dockerfile.renderer — Self-contained off-box renderer for RavenDB perf bundles.
+#
+# Build:
+#   docker build -f Dockerfile.renderer -t gregolsky/raven-perf-renderer .
+#
+# Run:
+#   docker run --rm -v "$(pwd)":/data gregolsky/raven-perf-renderer bundle.tgz
+#   docker run --rm -v "$(pwd)":/data -e S3_BUCKET=s3://... gregolsky/raven-perf-renderer \
+#          bundle.tgz --s3-bucket s3://debug-greg/perf-artifacts
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install perf matching the host kernel isn't possible in a generic image, so we
+# install the generic linux-tools package. For best results run this container on
+# the same kernel as the RavenDB host, or mount the matching linux-tools from the host.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        linux-tools-generic \
+        perl \
+        git \
+        curl \
+        unzip \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/*
+
+# FlameGraph scripts
+RUN git clone --depth 1 https://github.com/brendangregg/FlameGraph /opt/FlameGraph
+
+# AWS CLI v2
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
+
+# Create ~/.debug for perf inject
+RUN mkdir -p /root/.debug
+
+COPY raven-perf-render.sh /usr/local/bin/raven-perf-render.sh
+RUN chmod +x /usr/local/bin/raven-perf-render.sh
+
+WORKDIR /data
+
+ENTRYPOINT ["bash", "/usr/local/bin/raven-perf-render.sh"]

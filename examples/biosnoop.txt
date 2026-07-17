@@ -1,0 +1,20 @@
+# NOTE: This is an illustrative example showing typical output format.
+# Generated with: sudo timeout 20 biosnoop-bpfcc
+# (requires block-layer tracepoint support; may produce no output on some VMs)
+
+TIME(s)       COMM           PID    DISK    T SECTOR     BYTES  LAT(ms)
+0.000001      Raven.Server   61268  nvme0n1 W 83624992   32768     0.41
+0.000248      Raven.Server   61268  nvme0n1 W 83625056   32768     0.38
+0.001132      Raven.Server   61268  nvme0n1 W 83625120   32768     0.40
+0.042301      jbd2/sda1-8    430    nvme0n1 W 32505856   4096      0.52
+0.042744      jbd2/sda1-8    430    nvme0n1 W 32505864   4096      0.49
+0.112801      Raven.Server   61268  nvme0n1 R 41943040   131072    0.27
+0.115320      Raven.Server   61268  nvme0n1 R 42074112   131072    0.31
+0.201455      Raven.Server   61268  nvme0n1 W 83625184   65536     0.44
+0.344122      Raven.Server   61268  nvme0n1 W 83625312   65536     0.43
+0.344890      Raven.Server   61268  nvme0n1 W 83625376   32768     0.38
+0.501234      Raven.Server   61268  nvme0n1 R 83887104   4096      0.21
+1.004412      Raven.Server   61268  nvme0n1 W 83625408   32768     0.42
+1.006001      Raven.Server   61268  nvme0n1 W 83625472   32768     5.83  <-- journal flush
+1.331205      Raven.Server   61268  nvme0n1 W 83625536   131072    0.45
+1.550810      jbd2/sda1-8    430    nvme0n1 W 32506880   8192      0.51

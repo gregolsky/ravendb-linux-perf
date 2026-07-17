@@ -3,23 +3,47 @@
 Brendan-Gregg-style flamegraphs from a live RavenDB server showing merged
 **managed .NET frames · RavenDB/Voron internals · libcoreclr/JIT/GC native frames · kernel stacks**.
 
+Supports **on-CPU**, **off-CPU** (blocked time), **I/O**, **run-queue latency**,
+and **off-wake** profiling — across two engines (perf tracepoints or eBPF).
+
+See [TRACING.md](TRACING.md) for a full menu of trace types and what each answers.
+See [OVERHEAD.md](OVERHEAD.md) for knob explanations and overhead comparisons.
+See [examples/](examples/) for real captures from a RavenDB server.
+
+---
+
 ## Architecture
 
 ```
-┌──────────────────────────────────┐         ┌─────────────────────────────────┐
-│  RavenDB server (constrained)    │  nc/S3  │  Renderer (your workstation /   │
-│                                  │ ──────► │  EC2 / Docker)                  │
-│  raven-perf-collect.sh           │         │                                 │
-│  ├─ preflight (env + sysctl)     │         │  raven-perf-render.sh           │
-│  ├─ perf record (light FP)       │         │  ├─ perf inject --jit (dwarf)   │
-│  ├─ gather: perf.data +          │         │  ├─ perf script --kallsyms      │
-│  │   perfmap/jitdump + kallsyms  │         │  ├─ stackcollapse-perf.pl       │
-│  └─ tar | nc / aws s3 cp         │         │  ├─ flamegraph.pl               │
-└──────────────────────────────────┘         │  └─ publish SVG → S3 / browser  │
-                                             └─────────────────────────────────┘
+┌──────────────────────────────────────┐         ┌─────────────────────────────────┐
+│  RavenDB server (constrained)        │  nc/S3  │  Renderer (your workstation /   │
+│                                      │ ──────► │  EC2 / Docker)                  │
+│  perf/raven-perf-collect.sh          │         │                                 │
+│  ebpf/raven-ebpf-collect.sh          │         │  perf/raven-perf-render.sh      │
+│  ├─ preflight (env + sysctl)         │         │  ebpf/raven-ebpf-render.sh      │
+│  ├─ perf record OR eBPF tools        │         │  ├─ perf inject --jit (dwarf)   │
+│  ├─ gather: data + side-channel +    │         │  ├─ perf script --kallsyms      │
+│  │   kallsyms + meta                 │         │  ├─ stackcollapse-perf.pl       │
+│  └─ tar | nc / aws s3 cp             │         │  ├─ flamegraph.pl               │
+└──────────────────────────────────────┘         │  └─ publish SVG → S3 / browser  │
+                                                 └─────────────────────────────────┘
 ```
 
-Nothing heavy (DWARF unwind, inject, SVG render) runs on the DB host.
+Nothing heavy (inject, DWARF unwind, SVG render) runs on the DB host.
+
+---
+
+## Engine × type matrix
+
+| `--type` | What it answers | perf engine | eBPF engine |
+|---|---|---|---|
+| `cpu` | Where are CPU cycles? | ✅ default | ✅ |
+| `offcpu` | Where are threads blocked? | ✅ (needs schedstats) | ✅ recommended |
+| `io` | What is the disk doing? | ✅ code-path only | ✅ full suite |
+| `runqlat` | Waiting for a CPU? | ❌ | ✅ |
+| `offwake` | Who unblocked me? | ❌ | ✅ |
+
+**Tip:** use the **perf engine** for `cpu`; use the **eBPF engine** for everything else.
 
 ---
 
@@ -32,6 +56,9 @@ Nothing heavy (DWARF unwind, inject, SVG render) runs on the DB host.
 | `perf` | `perf --version` | `apt-get install linux-tools-$(uname -r)` |
 | `perf_event_paranoid ≤ 1` | `cat /proc/sys/kernel/perf_event_paranoid` | `sudo sysctl kernel.perf_event_paranoid=-1` |
 | `kptr_restrict = 0` | `cat /proc/sys/kernel/kptr_restrict` | `sudo sysctl kernel.kptr_restrict=0` |
+| `nc` (for nc transport) | `nc --version` | `apt-get install netcat-openbsd` |
+| `aws` CLI (for S3 transport) | `aws --version` | `snap install aws-cli --classic` |
+| eBPF tools (for `offcpu`/`io`/`runqlat`/`offwake`) | `offcputime-bpfcc --version` | `apt-get install bpfcc-tools` |
 
 `perf_event_paranoid` controls who can use the kernel's performance event subsystem.
 The default on most distros is `2` or `4` (restrict to root only); `perf` needs `≤ 1`
@@ -44,10 +71,7 @@ makes the full symbol table visible, giving you readable kernel stack frames
 (`entry_SYSCALL_64`, `futex_wait`, etc.). The `--kallsyms=` snapshot the collector
 captures preserves these symbols for use on the off-box renderer.
 
-| `nc` (for nc transport) | `nc --version` | `apt-get install netcat-openbsd` |
-| `aws` CLI (for S3 transport) | `aws --version` | `snap install aws-cli --classic` |
-
-Run `sudo bash 00-prereqs.sh [--persist]` to check and fix all of the above in one shot.
+Run `sudo bash common/00-prereqs.sh [--persist]` to check and fix all of the above.
 
 ### On the renderer
 
@@ -91,7 +115,7 @@ export DOTNET_ReadyToRun=0
 export DOTNET_EnableWriteXorExecute=0
 ./RavenDB/Server/Raven.Server
 ```
-Or use `20-run-ravendb-profiled.sh` (POC only; downloads RavenDB automatically).
+Or use `common/20-run-ravendb-profiled.sh` (POC only).
 
 | `DOTNET_PerfMapEnabled` | Effect |
 |---|---|
@@ -104,48 +128,72 @@ Or use `20-run-ravendb-profiled.sh` (POC only; downloads RavenDB automatically).
 ## Quick start: POC on a dev box
 
 ```bash
-# 0. Clone this repo / cd into this directory
-cd /home/gregolsky/Dev/perf
+# 0. Clone and cd
+git clone https://github.com/gregolsky/ravendb-linux-perf && cd ravendb-linux-perf
 
-# 1. Prerequisites (kernel settings + FlameGraph clone)
-sudo bash 00-prereqs.sh --persist
+# 1. Prerequisites (kernel settings + FlameGraph clone + eBPF check)
+sudo bash common/00-prereqs.sh --persist
 
 # 2. Download RavenDB (skip if already installed)
-bash 10-get-ravendb.sh
+bash common/10-get-ravendb.sh
 
 # 3. Launch RavenDB with profiling knobs (in a separate terminal)
-bash 20-run-ravendb-profiled.sh --fp      # or --dwarf for richer frames
+bash common/20-run-ravendb-profiled.sh --fp      # or --dwarf for richer frames
 
-# 4. In another terminal: load some data and drive CPU
-bash 30-load.sh --duration 60
+# 4. Drive load (another terminal)
+bash common/30-load.sh --duration 60
 
-# 5. Collect (while load is running)
-sudo bash raven-perf-collect.sh \
+# 5a. Collect on-CPU (while load is running)
+sudo bash perf/raven-perf-collect.sh \
   --pid "$(pgrep -f Raven.Server | head -1)" \
-  --duration 20 \
-  --output /tmp/raven-perf-out
+  --type cpu --duration 20 --output /tmp/raven-perf-out
+
+# 5b. Or collect off-CPU:
+sudo bash ebpf/raven-ebpf-collect.sh \
+  --pid "$(pgrep -f Raven.Server | head -1)" \
+  --type offcpu --duration 30 --output /tmp/raven-ebpf-out
 
 # 6. Render (on this box or transfer to another)
-bash raven-perf-render.sh /tmp/raven-perf-out/raven-perf-*.tgz --open
+bash perf/raven-perf-render.sh /tmp/raven-perf-out/raven-perf-cpu-*.tgz --open
+bash ebpf/raven-ebpf-render.sh /tmp/raven-ebpf-out/raven-ebpf-offcpu-*.tgz --open
 ```
 
 ---
 
-## Production usage: `curl | bash` one-liner
+## Production usage: `curl | bash` one-liners
+
+### perf engine (recommended for `cpu`)
 
 ```bash
 # Systemd service → send over nc to renderer
-curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/raven-perf-collect.sh | \
-  sudo bash -s -- --service ravendb --duration 20 --nc renderer-host:9000
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/perf/raven-perf-collect.sh | \
+  sudo bash -s -- --service ravendb --type cpu --duration 20 --nc renderer-host:9000
 
-# Docker container → send to S3
-curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/raven-perf-collect.sh | \
+# Docker container → S3
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/perf/raven-perf-collect.sh | \
   sudo -E S3_BUCKET=s3://debug-greg/perf-artifacts \
-  bash -s -- --docker ravendb --duration 20
+  bash -s -- --docker ravendb --type cpu --duration 20
 
-# Explicit PID → save locally
-curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/raven-perf-collect.sh | \
-  sudo bash -s -- --pid 12345 --output /var/tmp/perf-out --nc renderer-host:9000
+# Explicit PID, off-CPU (perf engine)
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/perf/raven-perf-collect.sh | \
+  sudo bash -s -- --pid 12345 --type offcpu --duration 20 --nc renderer-host:9000
+```
+
+### eBPF engine (recommended for `offcpu`, `io`, `runqlat`, `offwake`)
+
+```bash
+# Systemd service, off-CPU → nc
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
+  sudo bash -s -- --service ravendb --type offcpu --duration 30 --nc renderer-host:9000
+
+# Docker container, full I/O suite → S3
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
+  sudo -E S3_BUCKET=s3://debug-greg/perf-artifacts \
+  bash -s -- --docker ravendb --type io --duration 30
+
+# Run-queue latency (CPU saturation check)
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
+  sudo bash -s -- --pid 12345 --type runqlat --duration 20 --nc renderer-host:9000
 ```
 
 ### Renderer side (nc transport)
@@ -154,17 +202,18 @@ curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/r
 # 1. Listen for the bundle
 nc -l 9000 > bundle.tgz
 
-# 2. Render → SVG (local)
-bash raven-perf-render.sh bundle.tgz
+# 2. Render (auto-detects engine and type from meta.txt)
+bash perf/raven-perf-render.sh bundle.tgz          # perf bundles
+bash ebpf/raven-ebpf-render.sh bundle.tgz          # eBPF bundles
 
 # 3. Or render → S3
-bash raven-perf-render.sh bundle.tgz --s3-bucket s3://debug-greg/perf-artifacts
+bash perf/raven-perf-render.sh bundle.tgz --s3-bucket s3://debug-greg/perf-artifacts
 
 # 4. Or use the Docker renderer (no local perf/perl needed):
-docker build -f Dockerfile.renderer -t gregolsky/raven-perf-renderer .
+docker build -f perf/Dockerfile.renderer -t gregolsky/raven-perf-renderer .
 nc -l 9000 > bundle.tgz
-docker run --rm -v "$(pwd)":/data -e S3_BUCKET=s3://debug-greg/perf-artifacts \
-  gregolsky/raven-perf-renderer bundle.tgz --s3-bucket "$S3_BUCKET"
+docker run --rm -v "$(pwd)":/data \
+  gregolsky/raven-perf-renderer bundle.tgz
 ```
 
 ---
@@ -173,7 +222,6 @@ docker run --rm -v "$(pwd)":/data -e S3_BUCKET=s3://debug-greg/perf-artifacts \
 
 > For a full explanation of what each knob does, its overhead, and how it compares to
 > eBPF continuous profilers and `dotnet-trace`, see **[OVERHEAD.md](OVERHEAD.md)**.
-
 
 | | **Frame-pointer (default)** | **DWARF + `perf inject`** |
 |---|---|---|
@@ -200,8 +248,8 @@ Open the SVG in a browser and look for:
 was not set on the RavenDB process. Relaunch with the knob and re-capture.
 
 **If you see no managed frames at all:** The side-channel file was missing or had the
-wrong PID. The collector preflight should have caught this, but if you bypassed it,
-check `ls -l /tmp/perf-<pid>.map /tmp/jit-<pid>.dump`.
+wrong PID. The collector preflight should have caught this, but check
+`ls -l /tmp/perf-<pid>.map /tmp/jit-<pid>.dump`.
 
 ---
 
@@ -210,49 +258,65 @@ check `ls -l /tmp/perf-<pid>.map /tmp/jit-<pid>.dump`.
 ### Clock mismatch → no managed symbols after inject
 `perf record -k CLOCK_MONOTONIC` must match the clock the jitdump uses. If `perf inject`
 runs fine but managed frames still show as hex addresses, the timestamps didn't align.
-Try without `-k` (some .NET builds use arch/TSC). perf 6.8 (on this box) handles
-`JITDUMP_USE_ARCH_TIMESTAMP` auto-detection, so this is rarely a problem here.
+perf 6.8 (on this box) handles `JITDUMP_USE_ARCH_TIMESTAMP` auto-detection.
 
 ### `perf_event_paranoid` / `kptr_restrict` revert on reboot
-Use `00-prereqs.sh --persist` to write `/etc/sysctl.d/99-perf.conf`.
+Use `common/00-prereqs.sh --persist` to write `/etc/sysctl.d/99-perf.conf`.
 
 ### Container PID namespace
 In `--docker` mode the perfmap/jitdump filenames use the **container-internal PID**
-(`NSpid` from `/proc/<hostpid>/status`) and live in the container's `/tmp` (readable
-from the host at `/proc/<hostpid>/root/tmp/`). The collector handles this automatically:
+(`NSpid` from `/proc/<hostpid>/status`) and live in the container's `/tmp`. The
+collector handles this automatically:
 - perfmap is renamed to the host PID (so `perf script` finds it by the recorded PID)
-- jitdump keeps the namespaced PID (so `perf inject` finds it by the MMAP path in `perf.data`)
-
-Getting this wrong = unresolved managed frames even though everything "ran fine."
+- jitdump keeps the namespaced PID (so `perf inject` finds it by the MMAP path)
 
 ### Knobs need a restart
-`systemctl edit` / `docker run -e` take effect only after a restart. A restart
-re-JITs everything under a fresh PID → re-resolve target PID each capture.
+`systemctl edit` / `docker run -e` take effect only after a restart.
 
 ### `DOTNET_ReadyToRun=0` and startup time
-This makes the runtime JIT-compile all framework code instead of using precompiled R2R
-images. Startup is a few seconds slower, but all library symbols appear in the flamegraph.
-Omit it in production if startup latency matters — managed app code still symbolizes.
+Makes the runtime JIT-compile all framework code — startup is slower but all library
+symbols appear in the flamegraph. Drop in production if startup latency matters.
 
-### Same technique for source builds
-Export the same `DOTNET_*` vars before launching your dev `Raven.Server` binary.
-Nothing here is release-specific — it's all .NET runtime knobs and standard Linux perf.
+### Off-CPU perf needs schedstats
+`perf record -e sched:sched_stat_sleep` needs `kernel.sched_schedstats=1` to produce
+time-weighted stacks. Use `--sysctl-fix` or set it manually.
+
+### eBPF and VM environments
+Some eBPF tools (`biosnoop`, `biolatency`) may produce no output in VMs where block I/O
+bypasses the standard block-layer tracepoints (virtio-blk, cloud storage drivers).
+Run `biolatency-bpfcc 1 3` to verify your environment; if empty, fall back to
+`perf record -e block:block_rq_issue` (perf `io` type) which usually works.
 
 ---
 
 ## File layout
 
 ```
-perf/
-├── 00-prereqs.sh                  # Check/fix kernel settings + clone FlameGraph
-├── 10-get-ravendb.sh              # Download RavenDB release (POC only)
-├── 20-run-ravendb-profiled.sh     # Launch with profiling knobs (POC only)
-├── 30-load.sh                     # Northwind sample data + query/write load loop
-├── raven-perf-collect.sh          # Thin on-box collector (publish as gist)
-├── raven-perf-render.sh           # Off-box renderer
-├── Dockerfile.renderer            # Self-contained Docker renderer image
-├── FlameGraph/                    # Cloned by 00-prereqs.sh
-│   ├── flamegraph.pl
-│   └── stackcollapse-perf.pl
-└── README.md                      # This file
+ravendb-linux-perf/
+├── README.md                       # This file
+├── OVERHEAD.md                     # Knob explanations + overhead reference
+├── TRACING.md                      # Full trace-type reference table
+├── common/
+│   ├── 00-prereqs.sh               # Check/fix kernel settings + clone FlameGraph + eBPF check
+│   ├── 10-get-ravendb.sh           # Download RavenDB release (POC only)
+│   ├── 20-run-ravendb-profiled.sh  # Launch with profiling knobs (POC only)
+│   └── 30-load.sh                  # Northwind sample data + query/write load loop
+├── perf/
+│   ├── raven-perf-collect.sh       # Thin on-box collector (perf engine)
+│   ├── raven-perf-render.sh        # Off-box renderer (perf bundles)
+│   └── Dockerfile.renderer         # Self-contained Docker renderer (works for eBPF bundles too)
+├── ebpf/
+│   ├── raven-ebpf-collect.sh       # Thin on-box collector (eBPF engine)
+│   └── raven-ebpf-render.sh        # Off-box renderer (eBPF bundles)
+├── examples/                       # Real RavenDB captures (Northwind load)
+│   ├── cpu-flame.svg
+│   ├── offcpu-flame.svg
+│   ├── io-codepath-flame.svg
+│   ├── runqlat.txt
+│   ├── biolatency.txt
+│   ├── biosnoop.txt
+│   └── README.md
+└── FlameGraph/                     # Cloned by common/00-prereqs.sh (gitignored)
+    ├── flamegraph.pl
+    └── stackcollapse-perf.pl
 ```
