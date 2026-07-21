@@ -22,6 +22,7 @@ See [OVERHEAD.md](OVERHEAD.md) for a deeper explanation of the two engines
 | **Page cache** | `io` (eBPF) | Cache hit/miss ratio — is the working set in RAM? | eBPF | Low | ✅ |
 | **Native memory** | `alloc` | Where is *unmanaged* memory allocated from, and what's still held (bytes)? | eBPF | Medium (uprobes) | ✅ |
 | **Page faults** | `faults` | Where is the resident set (RSS) growing — first-touch of memory? | eBPF | Low (tracepoint) | ✅ |
+| **Managed memory** | `managed-alloc` | Which .NET *types* are allocated on the GC heap, and from where (bytes)? | dotnet (EventPipe) | Medium | ✅ |
 
 **Tip:** Use the **perf engine** for `cpu` (zero extra deps, works everywhere).
 Use the **eBPF engine** for everything else — in-kernel aggregation, lower overhead,
@@ -244,6 +245,44 @@ fault; use `faults` to find real memory-footprint growth.
 | eBPF | `sudo bash ebpf/raven-ebpf-collect.sh --type faults --service ravendb --duration 20` |
 
 Render: `bash ebpf/raven-ebpf-render.sh bundle.tgz`
+
+---
+
+### `managed-alloc` — Managed (.NET GC heap) allocation flamegraph
+
+**Question:** "Which .NET *types* are being allocated on the managed heap, and from which
+call paths — by bytes?"
+
+This is the **managed** counterpart to `alloc`. Managed allocations come from the GC's
+bump-pointer heap, not libc `malloc`, so eBPF uprobes can't attribute them by type. Instead this
+uses the .NET runtime's **EventPipe** diagnostics pipe via `dotnet-trace` (a third engine) — **no
+root, no `perf_event_paranoid`, and none of the `DOTNET_*` symbol knobs are needed** (EventPipe is
+self-describing). It captures `GCAllocationTick` events (type name + bytes + managed call stack),
+and the renderer's `nettrace-to-folded` converter turns them into a **byte-weighted flamegraph**
+with the allocated **type as the flame leaf**, plus a by-type summary.
+
+**What to look for in RavenDB:** RavenDB deliberately keeps the data path *off* the managed heap
+(blittable JSON, `ArenaMemoryAllocator`, `ArrayPool`, native Voron buffers), so this mostly
+surfaces HTTP/Kestrel request handling, JSON→managed materialization at API boundaries,
+LINQ/query and ETL paths, Lucene/Corax and Jint object graphs, and connectors — the code that
+actually pressures the GC. Cross-check the by-type totals against RavenDB's own
+`GET /admin/debug/memory/allocations` (Operator auth), which reports the same `GCAllocationTick`
+data by type.
+
+> **Attach requirements:** run as the **same user as RavenDB** (e.g. `sudo -u ravendb`) or root;
+> for Docker, the diagnostics socket is inside the container, so the collector uses `docker exec`
+> (dotnet-trace must be present in the container). `--sampled` switches to the finer (heavier)
+> `GCSampledObjectAllocation` events.
+
+> **Managed vs native:** use `managed-alloc` for GC-heap-by-type (clean managed stacks, no
+> `[unknown]`); use `alloc` for *native* memory (malloc/mmap, Voron, encryption buffers) and
+> `faults` for RSS commit. Together they cover the whole memory picture.
+
+| Engine | Command |
+|---|---|
+| dotnet | `sudo -u ravendb bash dotnet/raven-dotnet-collect.sh --service ravendb --duration 30 --output /tmp/out` |
+
+Render: `bash dotnet/raven-dotnet-render.sh bundle.tgz` (needs the .NET SDK — builds the converter)
 
 ---
 

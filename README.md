@@ -47,8 +47,13 @@ Nothing heavy (inject, DWARF unwind, SVG render) runs on the DB host.
 | `offwake` | Who unblocked me? | ❌ | ✅ |
 | `alloc` | Where is native memory allocated / held (bytes)? | ❌ | ✅ |
 | `faults` | Where is RSS growing (page faults)? | ❌ | ✅ |
+| `managed-alloc` | Which .NET types allocate (GC heap, bytes)? | ❌ | dotnet |
 
-**Tip:** use the **perf engine** for `cpu`; use the **eBPF engine** for everything else.
+**Tip:** use the **perf engine** for `cpu`; the **eBPF engine** for off-CPU/IO/native memory;
+and the **dotnet engine** (`dotnet/raven-dotnet-collect.sh`) for managed GC-heap allocations.
+
+Three engines: **perf** (`perf record`), **eBPF** (bcc tools), and **dotnet** (EventPipe /
+`dotnet-trace`) for managed allocations.
 
 ---
 
@@ -209,6 +214,16 @@ curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/e
   sudo bash -s -- --service ravendb --type faults --duration 20 --nc renderer-host:9000
 ```
 
+### dotnet engine (managed GC-heap allocations by type)
+
+```bash
+# Run as the same user as RavenDB (diagnostics socket ownership). No DOTNET_* knobs needed.
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/dotnet/raven-dotnet-collect.sh | \
+  sudo -u ravendb bash -s -- --service ravendb --duration 30 --nc renderer-host:9000
+# Render (renderer needs the .NET SDK — it builds the nettrace→folded converter):
+#   bash dotnet/raven-dotnet-render.sh bundle.tgz
+```
+
 ### Collect to a local file (no `nc`, no S3)
 
 Just want the raw capture bundle sitting on the box to download and render later? Omit
@@ -348,6 +363,11 @@ ravendb-linux-perf/
 ├── ebpf/
 │   ├── raven-ebpf-collect.sh       # Thin on-box collector (eBPF engine)
 │   └── raven-ebpf-render.sh        # Off-box renderer (eBPF bundles)
+├── dotnet/                         # dotnet engine (EventPipe) — managed allocations
+│   ├── raven-dotnet-collect.sh     # On-box collector (dotnet-trace)
+│   ├── raven-dotnet-render.sh      # Off-box renderer (.nettrace → flamegraph)
+│   └── nettrace-to-folded/         # C# TraceEvent converter (.nettrace → folded bytes)
+├── test/                           # bats suite (arg parsing, set -e regression, renderers)
 ├── examples/                       # Real RavenDB captures (Northwind load)
 │   ├── cpu-flame.svg
 │   ├── offcpu-flame.svg

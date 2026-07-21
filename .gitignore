@@ -11,6 +11,10 @@ FlameGraph/
 *.svg
 *.nettrace
 
+# .NET build output (converter under dotnet/)
+bin/
+obj/
+
 # Loose capture artifacts — normally inside a bundle, but can land in the cwd
 # when a bcc/dotnet tool is run directly in the repo. Example copies are
 # re-included below so committed samples stay tracked.

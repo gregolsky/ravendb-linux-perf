@@ -145,6 +145,10 @@ dotnet-trace collect --process-id $RAVEN_PID --output trace.nettrace
 dotnet-trace convert trace.nettrace --format Speedscope
 ```
 
+**Now scripted:** `dotnet/raven-dotnet-collect.sh` uses exactly this pipeline for the
+`managed-alloc` trace type — it collects `GCAllocationTick` events and the renderer converts them
+into a byte-weighted managed-allocation flamegraph (see [TRACING.md](TRACING.md#managed-alloc)).
+
 **What you get:** complete managed call stacks with exact symbol names, GC events,
 thread contention, JIT stats. Works in locked-down containers.
 
