@@ -35,6 +35,20 @@ load helpers
   done
 }
 
+@test "ebpf: runs from stdin (curl|bash) without unbound-variable (main-guard regression)" {
+  # Reproduces `curl … | bash -s -- …`: piping the script to bash leaves
+  # BASH_SOURCE unset. Pre-fix the guard `${BASH_SOURCE[0]}` tripped `set -u`.
+  run bash -s -- --type cpu < "$EBPF_COLLECT"
+  [[ "$output" != *"unbound variable"* ]]
+  [[ "$output" == *"Specify a target"* ]]   # main ran → parse_args reached
+}
+
+@test "perf: runs from stdin (curl|bash) without unbound-variable (main-guard regression)" {
+  run bash -s -- --type cpu < "$PERF_COLLECT"
+  [[ "$output" != *"unbound variable"* ]]
+  [[ "$output" == *"Specify a target"* ]]
+}
+
 @test "ebpf parse_args: missing target → error" {
   load_collector "$EBPF_COLLECT"
   run parse_args --type cpu

@@ -539,7 +539,10 @@ main() {
 }
 
 # Only run main when executed directly — sourcing (e.g. from bats) defines
-# functions without side effects.
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# functions without side effects. The `:-$0` default is required for the
+# `curl … | sudo bash -s -- …` case: piping to bash leaves BASH_SOURCE unset,
+# which would trip `set -u`; defaulting to $0 makes the comparison true so main
+# still runs from stdin.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
   main "$@"
 fi
