@@ -37,6 +37,9 @@
 #     --type runqlat       Scheduler run-queue latency histogram via runqlat
 #     --type alloc         Native/unmanaged memory: allocation-site flamegraphs
 #                          (malloc/mmap/rvn via stackcount) + memleak outstanding report
+#                          (byte-weighted flame is rendered from the memleak data)
+#     --type faults        Page-fault flamegraph — where RSS grows (first-touch),
+#                          via stackcount on t:exceptions:page_fault_user
 #
 #   Transport (pick one — required unless --demo):
 #     --nc <host:port>     Stream bundle to renderer via netcat
@@ -76,7 +79,7 @@ parse_args() {
       --docker)    MODE_TARGET=docker;  TARGET_ARG="${2:?--docker needs container name}"; shift ;;
       --pid)       MODE_TARGET=pid;     TARGET_ARG="${2:?--pid needs a number}"; shift ;;
       --demo)      MODE_TARGET=demo ;;
-      --type)      TRACE_TYPE="${2:?--type needs cpu|offcpu|offwake|io|runqlat|alloc}"; shift ;;
+      --type)      TRACE_TYPE="${2:?--type needs cpu|offcpu|offwake|io|runqlat|alloc|faults}"; shift ;;
       --duration)  DURATION="${2:?}"; shift ;;
       --freq)      FREQ="${2:?}"; shift ;;
       --nc)        NC_DEST="${2:?--nc needs host:port}"; shift ;;
@@ -92,8 +95,8 @@ parse_args() {
   fi
 
   case "$TRACE_TYPE" in
-    cpu|offcpu|offwake|io|runqlat|alloc) ;;
-    *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, offwake, io, runqlat, alloc" ;;
+    cpu|offcpu|offwake|io|runqlat|alloc|faults) ;;
+    *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, offwake, io, runqlat, alloc, faults" ;;
   esac
 }
 
@@ -408,6 +411,20 @@ do_capture() {
       else
         warn "  [4/4] memleak not found (install bpfcc-tools) — skipping outstanding-bytes report"
       fi
+      ;;
+
+    faults)
+      # Page-fault flamegraph: where physical memory is first-touched (RSS growth).
+      # The user page-fault tracepoint fires when a userspace access needs a page
+      # mapped in — managed frames resolve via /tmp/perf-<pid>.map, so you see the
+      # Raven/Voron/Corax paths that grow the resident set. Weighted by fault count
+      # (≈ pages, ~4 KB each). Low overhead (a tracepoint, not a uprobe).
+      local STACKCOUNT; STACKCOUNT=$(need_bcc stackcount)
+      info "eBPF page-fault profiling (PID $HOST_PID) ..."
+      _capture "$ARTIFACTS/faults.folded" "user page-faults" \
+        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" "t:exceptions:page_fault_user"
+      _apply_perfmap "$ARTIFACTS/faults.folded"
+      ok "faults.folded: $(wc -l < "$ARTIFACTS/faults.folded") stacks"
       ;;
   esac
 }

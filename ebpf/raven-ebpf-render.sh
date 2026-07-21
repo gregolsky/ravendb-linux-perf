@@ -123,6 +123,49 @@ _render_flame() {
   echo "$SVG"
 }
 
+# Collapse runs of unsymbolized native frames into a single [native] frame.
+# .NET managed frames resolve via the perfmap, but libcoreclr/libc/libcrypto
+# internals are stripped and show as [unknown]; squeezing consecutive ones keeps
+# the allocating managed path visible instead of a wall of [unknown]. The count
+# (the trailing integer) is preserved. Reads folded on stdin, writes on stdout.
+_collapse_native() {
+  awk '
+  {
+    line=$0
+    if (!match(line, /[0-9]+$/)) { print; next }
+    cnt=substr(line, RSTART)
+    stack=substr(line, 1, RSTART-2)
+    m=split(stack, fr, ";")
+    out=""; prev=""
+    for (i=1;i<=m;i++) {
+      f=fr[i]
+      if (f=="[unknown]") f="[native]"
+      if (f=="[native]" && prev=="[native]") continue
+      out=(out==""?f:out";"f)
+      prev=f
+    }
+    print out" "cnt
+  }'
+}
+
+# Convert `memleak --combined-only` text into byte-weighted folded stacks.
+# memleak prints per stack: a "<N> bytes in <M> allocations from stack" header
+# then frames leaf-first; we reverse to root-first, strip module/offset noise,
+# and weight by outstanding bytes. Pipe through _collapse_native afterwards.
+_memleak_to_folded() {
+  awk '
+  /^[ \t]+[0-9]+ bytes in .* from stack/ { flush(); match($0,/[0-9]+/); bytes=substr($0,RSTART,RLENGTH); nf=0; next }
+  /^\t\t/ {
+    f=$0; sub(/^\t\t/,"",f); sub(/ \[[^]]*\]$/,"",f); sub(/\+0x[0-9a-fA-F]+$/,"",f)
+    if (f=="[unknown]"||f=="") f="[native]"
+    frames[++nf]=f; next
+  }
+  { flush() }
+  END { flush() }
+  function flush(   i,s){ if(bytes==""||nf==0){bytes="";nf=0;return}
+    s=""; for(i=nf;i>=1;i--) s=(s==""?frames[i]:s";"frames[i]); print s" "bytes; bytes=""; nf=0 }'
+}
+
 _copy_text() {
   local SRC="$1"
   [[ ! -f "$SRC" ]] && return
@@ -157,22 +200,41 @@ case "$CAPTURE_TYPE" in
     ;;
 
   alloc)
-    # Native/unmanaged allocation-site flamegraphs (call-count weighted), mem palette.
-    [[ -s "$ARTIFACTS/alloc-malloc.folded" ]] && \
-      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-malloc.folded" alloc-malloc mem allocs)" )
-    [[ -s "$ARTIFACTS/alloc-mmap.folded" ]] && \
-      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-mmap.folded" alloc-mmap mem allocs)" )
-    [[ -s "$ARTIFACTS/alloc-rvn.folded" ]] && \
-      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-rvn.folded" alloc-rvn mem allocs)" )
+    # PRIMARY: byte-weighted flame of *outstanding* native memory, parsed from
+    # memleak.txt (weighted by bytes still held, not call count). This answers
+    # "how much native memory is held, and from where".
+    if [[ -s "$ARTIFACTS/memleak.txt" ]]; then
+      _memleak_to_folded < "$ARTIFACTS/memleak.txt" | _collapse_native \
+        > "$ARTIFACTS/alloc-outstanding.folded"
+      if [[ -s "$ARTIFACTS/alloc-outstanding.folded" ]]; then
+        SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-outstanding.folded" alloc-outstanding-bytes mem bytes)" )
+      fi
+    fi
+    # SECONDARY: call-count allocation-site flames (how *often* each path
+    # allocates), native noise collapsed to [native].
+    for KIND in malloc mmap rvn; do
+      RAW="$ARTIFACTS/alloc-${KIND}.folded"
+      [[ -s "$RAW" ]] || continue
+      _collapse_native < "$RAW" > "$ARTIFACTS/alloc-${KIND}-clean.folded"
+      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-${KIND}-clean.folded" "alloc-${KIND}" mem allocs)" )
+    done
     _copy_text "$ARTIFACTS/memleak.txt"
     echo ""
-    echo "── Top outstanding native allocations (memleak) ────"
+    echo "── Top outstanding native allocations (memleak, by bytes) ──"
     [[ -f "$ARTIFACTS/memleak.txt" ]] && head -40 "$ARTIFACTS/memleak.txt" || \
-      warn "no memleak.txt in bundle (memleak unavailable at capture time)"
-    if [[ ! -s "$ARTIFACTS/alloc-malloc.folded" && ! -s "$ARTIFACTS/alloc-mmap.folded" ]]; then
-      warn "allocation folded stacks are empty — no malloc/mmap in the capture window, or"
-      warn "the target had no allocation activity. Try a longer --duration under load."
+      warn "no memleak.txt in bundle (memleak unavailable at capture time — byte-weighted flame skipped)"
+    if [[ ! -s "$ARTIFACTS/memleak.txt" && ! -s "$ARTIFACTS/alloc-malloc.folded" ]]; then
+      warn "no allocation data — nothing allocated in the window, or the target was idle."
+      warn "Try a longer --duration under load."
     fi
+    ;;
+
+  faults)
+    # Page-fault flamegraph — where physical memory is first-touched (RSS growth).
+    # Weighted by user page faults; each fault pages in ~one page of memory.
+    [[ -s "$ARTIFACTS/faults.folded" ]] || die "Bundle missing faults.folded"
+    _collapse_native < "$ARTIFACTS/faults.folded" > "$ARTIFACTS/faults-clean.folded"
+    SVGS+=( "$(_render_flame "$ARTIFACTS/faults-clean.folded" faults mem faults)" )
     ;;
 
   io)
