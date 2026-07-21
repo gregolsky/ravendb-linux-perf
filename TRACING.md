@@ -20,6 +20,7 @@ See [OVERHEAD.md](OVERHEAD.md) for a deeper explanation of the two engines
 | **Block I/O** | `io` | Disk latency histogram, per-I/O trace, which code issues I/O, I/O sizes | perf (code-path) / eBPF (all) | Low–medium | ✅ |
 | **Filesystem** | `io` (eBPF) | Slow FS operations above a threshold (`ext4slower`/`fileslower`) | eBPF | Low | ✅ |
 | **Page cache** | `io` (eBPF) | Cache hit/miss ratio — is the working set in RAM? | eBPF | Low | ✅ |
+| **Native memory** | `alloc` | Where is *unmanaged* memory allocated from, and what's still held? | eBPF | Medium (uprobes) | ✅ |
 
 **Tip:** Use the **perf engine** for `cpu` (zero extra deps, works everywhere).
 Use the **eBPF engine** for everything else — in-kernel aggregation, lower overhead,
@@ -151,6 +152,58 @@ The `io` type runs several complementary tools and bundles their output together
 
 Render: `bash ebpf/raven-ebpf-render.sh bundle.tgz`
 Examples: [io-codepath-flame.svg](examples/io-codepath-flame.svg) · [biolatency.txt](examples/biolatency.txt) · [biosnoop.txt](examples/biosnoop.txt)
+
+---
+
+### `alloc` — Native (unmanaged) memory allocation & leaks
+
+**Question:** "Where is RavenDB's *unmanaged* memory being allocated from, and what's
+still held?"
+
+This traces **native** memory only — not the managed .NET GC heap. RavenDB's unmanaged
+memory bottoms out on three different native symbols, so `alloc` probes all three:
+
+| RavenDB path | Managed entry point | Native symbol probed | Library |
+|---|---|---|---|
+| General heap (ByteString arenas, JSON contexts, most Sparrow allocs) | `Sparrow.Utils.NativeMemory.AllocateMemory` → `Marshal.AllocHGlobal` | `malloc` | `libc.so.6` |
+| 4 KB-aligned anon buffers (encryption / aligned I/O) | `PlatformSpecific.NativeMemory.Allocate4KbAlignedMemory` → `Syscall.mmap64` | `mmap64` | `libc.so.6` |
+| Voron data/journal/scratch file growth | Pagers → `Pal.rvn_allocate_more_space` | `rvn_allocate_more_space` | `librvnpal.linux.x64.so` |
+
+Two complementary outputs:
+- **`alloc-malloc` / `alloc-mmap` / `alloc-rvn` flamegraphs** (`stackcount -f`): width ∝
+  *number of allocation calls* per code path. Managed callers resolve via the same
+  `/tmp/perf-<pid>.map` side-channel as `cpu`. `mmap64` catches both the aligned-anon path
+  and (transitively) Voron file mappings; `alloc-rvn` isolates Voron file growth.
+- **`memleak.txt`** (`memleak --combined-only`): the top stacks by *bytes still outstanding*
+  (allocated and not yet freed) over the window — the leak / "who's holding memory" view that
+  the call-count flames don't give.
+
+> **Important — arena/pool caveat:** `Sparrow.NativeMemory` and `ByteStringContext` are
+> **arena allocators** that grab large blocks (4 KB–2 MB) up front, sub-allocate by pointer
+> arithmetic, and **pool/reuse** them. So `malloc`/`mmap` tracing shows *block-level churn*,
+> not per-object allocations. Read it as "which code paths drive native block allocation,"
+> not "every `new`."
+
+**What to look for in RavenDB:**
+- Wide `Sparrow.*` / `ByteStringContext` towers → arena block allocation/growth
+- `Voron.Impl.Scratch.*` / `EncryptionBuffersPool` → scratch / encryption buffer refills
+- `rvn_allocate_more_space` under `Voron.*Pager` → data/journal file growth
+- `memleak.txt` totals steadily climbing across repeated captures → possible native leak
+
+> **Cross-check:** RavenDB self-accounts native memory (`NativeMemory.TotalAllocatedMemory`,
+> per-thread `ThreadAllocations`, and the `NativeMemory.FileMapping` mmap registry). Compare
+> `memleak.txt` totals against those figures for an order-of-magnitude sanity check.
+
+> **Overhead:** medium — each `malloc`/`mmap64` in the target fires a uprobe. RavenDB's arena
+> allocators keep the `malloc` rate moderate (block-level, pooled), but this is heavier than
+> sampling. Keep `--duration` short (10–15 s); the collector runs the probes sequentially to
+> bound the peak. eBPF-only (needs `stackcount`/`memleak` from `bpfcc-tools`).
+
+| Engine | Command |
+|---|---|
+| eBPF | `sudo bash ebpf/raven-ebpf-collect.sh --type alloc --service ravendb --duration 15` |
+
+Render: `bash ebpf/raven-ebpf-render.sh bundle.tgz`
 
 ---
 

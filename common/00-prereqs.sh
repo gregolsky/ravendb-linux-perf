@@ -102,6 +102,18 @@ else
   [[ "$BPFTRACE_FOUND" -eq 1 ]] && ok "bpftrace: $(bpftrace --version 2>&1 | head -1)"
 fi
 
+# Allocation tracing (--type alloc) needs stackcount; memleak is used for the leak report.
+for CMD in stackcount-bpfcc stackcount; do
+  if command -v "$CMD" &>/dev/null || [[ -x "/usr/share/bcc/tools/stackcount" ]]; then
+    ok "stackcount: available (--type alloc allocation-site flamegraphs)"; break
+  fi
+done
+for CMD in memleak-bpfcc memleak; do
+  if command -v "$CMD" &>/dev/null || [[ -x "/usr/share/bcc/tools/memleak" ]]; then
+    ok "memleak: available (--type alloc outstanding/leak report)"; break
+  fi
+done
+
 # BTF (needed by newer bcc/bpftrace)
 if [[ -f "/sys/kernel/btf/vmlinux" ]]; then
   ok "BTF: /sys/kernel/btf/vmlinux present"

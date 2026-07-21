@@ -156,6 +156,25 @@ case "$CAPTURE_TYPE" in
     cat "$ARTIFACTS/runqlat.txt"
     ;;
 
+  alloc)
+    # Native/unmanaged allocation-site flamegraphs (call-count weighted), mem palette.
+    [[ -s "$ARTIFACTS/alloc-malloc.folded" ]] && \
+      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-malloc.folded" alloc-malloc mem allocs)" )
+    [[ -s "$ARTIFACTS/alloc-mmap.folded" ]] && \
+      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-mmap.folded" alloc-mmap mem allocs)" )
+    [[ -s "$ARTIFACTS/alloc-rvn.folded" ]] && \
+      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-rvn.folded" alloc-rvn mem allocs)" )
+    _copy_text "$ARTIFACTS/memleak.txt"
+    echo ""
+    echo "── Top outstanding native allocations (memleak) ────"
+    [[ -f "$ARTIFACTS/memleak.txt" ]] && head -40 "$ARTIFACTS/memleak.txt" || \
+      warn "no memleak.txt in bundle (memleak unavailable at capture time)"
+    if [[ ! -s "$ARTIFACTS/alloc-malloc.folded" && ! -s "$ARTIFACTS/alloc-mmap.folded" ]]; then
+      warn "allocation folded stacks are empty — no malloc/mmap in the capture window, or"
+      warn "the target had no allocation activity. Try a longer --duration under load."
+    fi
+    ;;
+
   io)
     [[ -f "$ARTIFACTS/io-codepath.folded" ]] && \
       SVGS+=( "$(_render_flame "$ARTIFACTS/io-codepath.folded" io-codepath io samples)" )

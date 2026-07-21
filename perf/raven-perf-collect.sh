@@ -98,9 +98,9 @@ done
 # Validate trace type; reject eBPF-only types with a helpful redirect
 case "$TRACE_TYPE" in
   cpu|offcpu|io) ;;
-  runqlat|offwake)
+  runqlat|offwake|alloc)
     die "--type $TRACE_TYPE is eBPF-only. Use the eBPF collector instead:\n  curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | sudo bash -s -- --type $TRACE_TYPE ..." ;;
-  *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, io  (for runqlat/offwake use the eBPF collector)" ;;
+  *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, io  (for runqlat/offwake/alloc use the eBPF collector)" ;;
 esac
 
 # ─── Relaunch-hint block (printed when knobs are missing) ───────────────────

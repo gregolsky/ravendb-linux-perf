@@ -4,7 +4,8 @@ Brendan-Gregg-style flamegraphs from a live RavenDB server showing merged
 **managed .NET frames · RavenDB/Voron internals · libcoreclr/JIT/GC native frames · kernel stacks**.
 
 Supports **on-CPU**, **off-CPU** (blocked time), **I/O**, **run-queue latency**,
-and **off-wake** profiling — across two engines (perf tracepoints or eBPF).
+**off-wake**, and **native-memory allocation** profiling — across two engines
+(perf tracepoints or eBPF).
 
 See [TRACING.md](TRACING.md) for a full menu of trace types and what each answers.
 See [OVERHEAD.md](OVERHEAD.md) for knob explanations and overhead comparisons.
@@ -42,6 +43,7 @@ Nothing heavy (inject, DWARF unwind, SVG render) runs on the DB host.
 | `io` | What is the disk doing? | ✅ code-path only | ✅ full suite |
 | `runqlat` | Waiting for a CPU? | ❌ | ✅ |
 | `offwake` | Who unblocked me? | ❌ | ✅ |
+| `alloc` | Where is native memory allocated / leaking? | ❌ | ✅ |
 
 **Tip:** use the **perf engine** for `cpu`; use the **eBPF engine** for everything else.
 
@@ -58,7 +60,7 @@ Nothing heavy (inject, DWARF unwind, SVG render) runs on the DB host.
 | `kptr_restrict = 0` | `cat /proc/sys/kernel/kptr_restrict` | `sudo sysctl kernel.kptr_restrict=0` |
 | `nc` (for nc transport) | `nc --version` | `apt-get install netcat-openbsd` |
 | `aws` CLI (for S3 transport) | `aws --version` | `snap install aws-cli --classic` |
-| eBPF tools (for `offcpu`/`io`/`runqlat`/`offwake`) | `offcputime-bpfcc --version` | `apt-get install bpfcc-tools` |
+| eBPF tools (for `offcpu`/`io`/`runqlat`/`offwake`/`alloc`) | `offcputime-bpfcc --version` | `apt-get install bpfcc-tools` |
 
 `perf_event_paranoid` controls who can use the kernel's performance event subsystem.
 The default on most distros is `2` or `4` (restrict to root only); `perf` needs `≤ 1`
@@ -194,7 +196,38 @@ curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/e
 # Run-queue latency (CPU saturation check)
 curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
   sudo bash -s -- --pid 12345 --type runqlat --duration 20 --nc renderer-host:9000
+
+# Native/unmanaged memory allocation sites + leak report (keep duration short — uprobes)
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
+  sudo bash -s -- --service ravendb --type alloc --duration 15 --nc renderer-host:9000
 ```
+
+### Collect to a local file (no `nc`, no S3)
+
+Just want the raw capture bundle sitting on the box to download and render later? Omit
+`--nc`/`S3_BUCKET` and pass `--output <dir>` — the collector writes
+`raven-<engine>-<type>-<host>-<timestamp>.tgz` (containing `perf.data` for the perf engine,
+or the folded/text artifacts for eBPF) into that dir and exits. Nothing is streamed.
+
+```bash
+# perf engine → local file (on-CPU)
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/perf/raven-perf-collect.sh | \
+  sudo bash -s -- --service ravendb --type cpu --duration 20 --output /var/tmp/raven-perf
+
+# eBPF engine → local file (off-CPU)
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
+  sudo bash -s -- --service ravendb --type offcpu --duration 30 --output /var/tmp/raven-perf
+```
+
+The collector prints the exact bundle path. Then, from your workstation, pull it down and render:
+
+```bash
+scp ravendb-host:/var/tmp/raven-perf/raven-*-*.tgz .
+bash perf/raven-perf-render.sh raven-perf-cpu-*.tgz --open        # perf bundles
+bash ebpf/raven-ebpf-render.sh raven-ebpf-offcpu-*.tgz --open     # eBPF bundles
+```
+
+---
 
 ### Renderer side (nc transport)
 

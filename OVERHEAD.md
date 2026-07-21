@@ -182,7 +182,7 @@ Compared to `perf record`:
   (Parca server, Grafana Pyroscope) where you query over time.
 
 This toolkit uses bcc-tools for ad-hoc captures in `ebpf/raven-ebpf-collect.sh`,
-supporting five trace types:
+supporting six trace types:
 
 | `--type` | bcc tool(s) | What it produces |
 |---|---|---|
@@ -191,6 +191,15 @@ supporting five trace types:
 | `offwake` | `offwaketime` | Off-CPU + waker stacks |
 | `io` | `biolatency` + `biosnoop` + `biostacks` + `ext4slower` + `cachestat` + `bitesize` | Block I/O suite |
 | `runqlat` | `runqlat` | Run-queue latency histogram |
+| `alloc` | `stackcount` (`c:malloc`, `c:mmap64`, `librvnpal:rvn_allocate_more_space`) + `memleak` | Native allocation-site folded stacks + outstanding-bytes report |
+
+> **`alloc` overhead is higher than the others.** `cpu`/`offcpu`/`io`/`runqlat` sample or
+> hook a bounded set of events; `alloc` attaches **uprobes to `malloc`/`mmap64`**, which fire
+> on *every* native allocation in the target. RavenDB's arena/pool allocators keep the rate
+> moderate (block-level, not per-object), but treat it as **medium** overhead: use short
+> windows (10–15 s), and note the collector runs its probes sequentially so only one uprobe
+> set is active at a time. For fine-grained bytes-weighting, `memleak -s SAMPLE_RATE` can
+> sample every Nth allocation to trade accuracy for lower cost.
 
 For continuous fleet-wide profiling:
 - [Grafana Pyroscope](https://grafana.com/oss/pyroscope/) — pull or push; Helm chart.

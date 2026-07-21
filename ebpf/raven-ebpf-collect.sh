@@ -35,6 +35,8 @@
 #     --type offwake       Off-CPU + waker stacks via offwaketime
 #     --type io            Block I/O: latency histogram + biosnoop + code-path + FS + cache
 #     --type runqlat       Scheduler run-queue latency histogram via runqlat
+#     --type alloc         Native/unmanaged memory: allocation-site flamegraphs
+#                          (malloc/mmap/rvn via stackcount) + memleak outstanding report
 #
 #   Transport (pick one — required unless --demo):
 #     --nc <host:port>     Stream bundle to renderer via netcat
@@ -73,7 +75,7 @@ while [[ $# -gt 0 ]]; do
     --docker)    MODE_TARGET=docker;  TARGET_ARG="${2:?--docker needs container name}"; shift 2 ;;
     --pid)       MODE_TARGET=pid;     TARGET_ARG="${2:?--pid needs a number}"; shift 2 ;;
     --demo)      MODE_TARGET=demo ;;
-    --type)      TRACE_TYPE="${2:?--type needs cpu|offcpu|offwake|io|runqlat}"; shift ;;
+    --type)      TRACE_TYPE="${2:?--type needs cpu|offcpu|offwake|io|runqlat|alloc}"; shift ;;
     --duration)  DURATION="${2:?}"; shift ;;
     --freq)      FREQ="${2:?}"; shift ;;
     --nc)        NC_DEST="${2:?--nc needs host:port}"; shift ;;
@@ -87,8 +89,8 @@ done
 [[ -z "$MODE_TARGET" ]] && die "Specify a target: --service <unit> | --docker <name> | --pid <n> | --demo"
 
 case "$TRACE_TYPE" in
-  cpu|offcpu|offwake|io|runqlat) ;;
-  *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, offwake, io, runqlat" ;;
+  cpu|offcpu|offwake|io|runqlat|alloc) ;;
+  *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, offwake, io, runqlat, alloc" ;;
 esac
 
 # ─── bcc tool resolver ──────────────────────────────────────────────────────
@@ -324,6 +326,64 @@ do_capture() {
           ok "${FS_TOOL}.txt"
         fi
       done
+      ;;
+
+    alloc)
+      # ─── Native / unmanaged memory allocation tracing ──────────────────────
+      # RavenDB unmanaged memory bottoms out on three native symbols:
+      #   • libc malloc  ← Sparrow.NativeMemory / ByteString arenas (Marshal.AllocHGlobal)
+      #   • libc mmap64  ← 4KB-aligned encryption/IO buffers + (transitively) Voron mappings
+      #   • librvnpal rvn_allocate_more_space ← Voron data/journal file growth
+      # stackcount -f emits call-count-weighted folded stacks (→ flamegraph). Managed
+      # frames resolve from /tmp/perf-<pid>.map at capture time (bcc reads it directly).
+      # memleak adds a bytes-weighted "still outstanding" report for leak hunting.
+      # NOTE: these are arena/pool allocators, so malloc/mmap tracing shows block-level
+      # churn (4KB–2MB), not per-object allocations. Tools run sequentially to bound
+      # peak uprobe overhead; --duration applies per probe.
+      local STACKCOUNT; STACKCOUNT=$(need_bcc stackcount)
+      local MEMLEAK;    MEMLEAK=$(find_bcc_tool memleak)
+
+      info "eBPF native-allocation tracing (PID $HOST_PID); ${DURATION}s per probe ..."
+
+      # 1. malloc allocation sites (the bulk: arena/heap churn)
+      info "  [1/4] stackcount c:malloc ..."
+      timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:malloc \
+        > "$ARTIFACTS/alloc-malloc.folded" 2>/dev/null || true
+      _apply_perfmap "$ARTIFACTS/alloc-malloc.folded"
+      ok "alloc-malloc.folded: $(wc -l < "$ARTIFACTS/alloc-malloc.folded") stacks"
+
+      # 2. mmap64 allocation sites (aligned anon buffers + Voron file mappings)
+      info "  [2/4] stackcount c:mmap64 ..."
+      timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:mmap64 \
+        > "$ARTIFACTS/alloc-mmap.folded" 2>/dev/null || true
+      _apply_perfmap "$ARTIFACTS/alloc-mmap.folded"
+      ok "alloc-mmap.folded: $(wc -l < "$ARTIFACTS/alloc-mmap.folded") stacks"
+
+      # 3. Voron file-mapping growth, isolated (best-effort; needs librvnpal in maps).
+      #    maps is read at the HOST pid; the .so path inside it is container-internal,
+      #    so reach the actual file via CONTAINER_ROOT (empty for non-container targets).
+      local RVNPAL
+      RVNPAL=$(awk '/librvnpal.*\.so/{print $NF; exit}' "/proc/$HOST_PID/maps" 2>/dev/null || true)
+      if [[ -n "$RVNPAL" && -f "${CONTAINER_ROOT}${RVNPAL}" ]]; then
+        info "  [3/4] stackcount ${RVNPAL##*/}:rvn_allocate_more_space ..."
+        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" \
+          "${CONTAINER_ROOT}${RVNPAL}:rvn_allocate_more_space" \
+          > "$ARTIFACTS/alloc-rvn.folded" 2>/dev/null || true
+        _apply_perfmap "$ARTIFACTS/alloc-rvn.folded"
+        ok "alloc-rvn.folded: $(wc -l < "$ARTIFACTS/alloc-rvn.folded") stacks"
+      else
+        warn "  [3/4] librvnpal not found in /proc/$HOST_PID/maps — skipping Voron rvn_* probe"
+      fi
+
+      # 4. Outstanding / leak report (bytes-weighted; best-effort)
+      if [[ -n "$MEMLEAK" ]]; then
+        info "  [4/4] memleak (outstanding allocations, ${DURATION}s) ..."
+        "$MEMLEAK" -p "$HOST_PID" -T 30 --combined-only "$DURATION" 1 \
+          > "$ARTIFACTS/memleak.txt" 2>/dev/null || true
+        ok "memleak.txt: $(wc -l < "$ARTIFACTS/memleak.txt") lines"
+      else
+        warn "  [4/4] memleak not found (install bpfcc-tools) — skipping outstanding-bytes report"
+      fi
       ;;
   esac
 }
