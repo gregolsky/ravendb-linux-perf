@@ -71,9 +71,9 @@ SYSCTL_FIX=0
 # ─── Arg parsing ────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --service)   MODE_TARGET=service; TARGET_ARG="${2:-ravendb}"; shift 2 ;;
-    --docker)    MODE_TARGET=docker;  TARGET_ARG="${2:?--docker needs container name}"; shift 2 ;;
-    --pid)       MODE_TARGET=pid;     TARGET_ARG="${2:?--pid needs a number}"; shift 2 ;;
+    --service)   MODE_TARGET=service; TARGET_ARG="${2:-ravendb}"; shift ;;
+    --docker)    MODE_TARGET=docker;  TARGET_ARG="${2:?--docker needs container name}"; shift ;;
+    --pid)       MODE_TARGET=pid;     TARGET_ARG="${2:?--pid needs a number}"; shift ;;
     --demo)      MODE_TARGET=demo ;;
     --type)      TRACE_TYPE="${2:?--type needs cpu|offcpu|offwake|io|runqlat|alloc}"; shift ;;
     --duration)  DURATION="${2:?}"; shift ;;
