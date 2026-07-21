@@ -69,29 +69,33 @@ OUTPUT_DIR=""
 SYSCTL_FIX=0
 
 # ─── Arg parsing ────────────────────────────────────────────────────────────
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --service)   MODE_TARGET=service; TARGET_ARG="${2:-ravendb}"; shift ;;
-    --docker)    MODE_TARGET=docker;  TARGET_ARG="${2:?--docker needs container name}"; shift ;;
-    --pid)       MODE_TARGET=pid;     TARGET_ARG="${2:?--pid needs a number}"; shift ;;
-    --demo)      MODE_TARGET=demo ;;
-    --type)      TRACE_TYPE="${2:?--type needs cpu|offcpu|offwake|io|runqlat|alloc}"; shift ;;
-    --duration)  DURATION="${2:?}"; shift ;;
-    --freq)      FREQ="${2:?}"; shift ;;
-    --nc)        NC_DEST="${2:?--nc needs host:port}"; shift ;;
-    --output)    OUTPUT_DIR="${2:?}"; shift ;;
-    --sysctl-fix) SYSCTL_FIX=1 ;;
-    *) die "Unknown flag: $1" ;;
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --service)   MODE_TARGET=service; TARGET_ARG="${2:-ravendb}"; shift ;;
+      --docker)    MODE_TARGET=docker;  TARGET_ARG="${2:?--docker needs container name}"; shift ;;
+      --pid)       MODE_TARGET=pid;     TARGET_ARG="${2:?--pid needs a number}"; shift ;;
+      --demo)      MODE_TARGET=demo ;;
+      --type)      TRACE_TYPE="${2:?--type needs cpu|offcpu|offwake|io|runqlat|alloc}"; shift ;;
+      --duration)  DURATION="${2:?}"; shift ;;
+      --freq)      FREQ="${2:?}"; shift ;;
+      --nc)        NC_DEST="${2:?--nc needs host:port}"; shift ;;
+      --output)    OUTPUT_DIR="${2:?}"; shift ;;
+      --sysctl-fix) SYSCTL_FIX=1 ;;
+      *) die "Unknown flag: $1" ;;
+    esac
+    shift
+  done
+
+  if [[ -z "$MODE_TARGET" ]]; then
+    die "Specify a target: --service <unit> | --docker <name> | --pid <n> | --demo"
+  fi
+
+  case "$TRACE_TYPE" in
+    cpu|offcpu|offwake|io|runqlat|alloc) ;;
+    *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, offwake, io, runqlat, alloc" ;;
   esac
-  shift
-done
-
-[[ -z "$MODE_TARGET" ]] && die "Specify a target: --service <unit> | --docker <name> | --pid <n> | --demo"
-
-case "$TRACE_TYPE" in
-  cpu|offcpu|offwake|io|runqlat|alloc) ;;
-  *) die "Unknown --type '$TRACE_TYPE'. Valid: cpu, offcpu, offwake, io, runqlat, alloc" ;;
-esac
+}
 
 # ─── bcc tool resolver ──────────────────────────────────────────────────────
 # Different distros install bcc tools under different names/paths.
@@ -171,10 +175,15 @@ EOF
 }
 
 # ─── Work directory ─────────────────────────────────────────────────────────
-WORK=$(mktemp -d /tmp/raven-ebpf-XXXXXXXX)
-trap 'rm -rf "$WORK"' EXIT
-ARTIFACTS="$WORK/artifacts"
-mkdir -p "$ARTIFACTS"
+# Called from main() only (not on source) so the script is safe to `source` in tests.
+setup_workdir() {
+  WORK=$(mktemp -d /tmp/raven-ebpf-XXXXXXXX)
+  trap 'rm -rf "$WORK"' EXIT
+  ARTIFACTS="$WORK/artifacts"
+  mkdir -p "$ARTIFACTS"
+  BUNDLE_NAME="raven-ebpf-${TRACE_TYPE}-$(hostname -s)-$(date +%Y%m%dT%H%M%SZ)"
+  BUNDLE_FILE="$WORK/${BUNDLE_NAME}.tgz"
+}
 
 # ─── 1. Kernel preflight ────────────────────────────────────────────────────
 check_kernel_settings() {
@@ -417,9 +426,6 @@ _apply_perfmap() {
 }
 
 # ─── 6. Bundle ──────────────────────────────────────────────────────────────
-BUNDLE_NAME="raven-ebpf-${TRACE_TYPE}-$(hostname -s)-$(date +%Y%m%dT%H%M%SZ)"
-BUNDLE_FILE="$WORK/${BUNDLE_NAME}.tgz"
-
 do_bundle() {
   info "Gathering side-channel and metadata ..."
 
@@ -536,34 +542,45 @@ run_demo() {
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────────
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  RavenDB eBPF collector  [target: $MODE_TARGET | type: $TRACE_TYPE]"
-echo "═══════════════════════════════════════════════════════"
-echo ""
+main() {
+  parse_args "$@"
+  setup_workdir
 
-check_kernel_settings
+  echo ""
+  echo "═══════════════════════════════════════════════════════"
+  echo "  RavenDB eBPF collector  [target: $MODE_TARGET | type: $TRACE_TYPE]"
+  echo "═══════════════════════════════════════════════════════"
+  echo ""
 
-if [[ "$MODE_TARGET" == "demo" ]]; then
-  run_demo
-else
-  case "$MODE_TARGET" in
-    service) resolve_pid_service ;;
-    docker)  resolve_pid_docker  ;;
-    pid)     resolve_pid_explicit ;;
-  esac
-  info "Target PID: $HOST_PID (ns: $NS_PID)"
-  check_process_env
-  check_side_channel
-  do_capture
+  check_kernel_settings
+
+  if [[ "$MODE_TARGET" == "demo" ]]; then
+    run_demo
+  else
+    case "$MODE_TARGET" in
+      service) resolve_pid_service ;;
+      docker)  resolve_pid_docker  ;;
+      pid)     resolve_pid_explicit ;;
+    esac
+    info "Target PID: $HOST_PID (ns: $NS_PID)"
+    check_process_env
+    check_side_channel
+    do_capture
+  fi
+
+  do_bundle
+  do_ship
+
+  echo ""
+  echo "═══════════════════════════════════════════════════════"
+  echo "  Collection complete."
+  echo "  Bundle: ${BUNDLE_NAME}.tgz"
+  echo "  Render it with:  bash ebpf/raven-ebpf-render.sh <bundle.tgz>"
+  echo "═══════════════════════════════════════════════════════"
+}
+
+# Only run main when executed directly — sourcing (e.g. from bats) defines
+# functions without side effects.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-do_bundle
-do_ship
-
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  Collection complete."
-echo "  Bundle: ${BUNDLE_NAME}.tgz"
-echo "  Render it with:  bash ebpf/raven-ebpf-render.sh <bundle.tgz>"
-echo "═══════════════════════════════════════════════════════"
