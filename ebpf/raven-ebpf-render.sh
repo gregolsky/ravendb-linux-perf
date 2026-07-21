@@ -149,13 +149,55 @@ _collapse_native() {
     out=""; prev=""
     for (i=1;i<=m;i++) {
       f=fr[i]
-      if (f=="[unknown]") f="[native]"
+      # Unresolved frames: bcc emits [unknown]; bpftrace emits a bare hex address
+      # (e.g. 0x770e1b83aef1) for stripped native code. Fold both to [native].
+      if (f=="[unknown]" || f ~ /^0x[0-9a-fA-F]+$/) f="[native]"
       if (f=="[native]" && prev=="[native]") continue
       out=(out==""?f:out";"f)
       prev=f
     }
     print out" "cnt
   }'
+}
+
+# Resolve bare hex frames (0x…) in folded stacks against a JIT perfmap
+# (/tmp/perf-<pid>.map: "<startHex> <sizeHex> <symbol>"). bpftrace, unlike bcc,
+# does not read the perfmap, so its byte-volume stacks arrive as raw addresses;
+# this names the JIT/managed ones off-box from the bundled map. Native frames
+# (not in the map) are left as-is for _collapse_native to fold to [native].
+# Args: <perfmap-path>. Reads folded on stdin, writes on stdout.
+_symbolize_perfmap() {
+  local PERFMAP="$1"
+  if [[ ! -s "$PERFMAP" ]]; then cat; return; fi
+  perl -e '
+    my $map = shift @ARGV;
+    open(my $m, "<", $map) or do { print while <STDIN>; exit };
+    my (@lo, @hi, @nm);
+    while (<$m>) {
+      my ($s, $sz, $n) = /^(\S+)\s+(\S+)\s+(.*)$/ or next;
+      my $start = hex($s); my $size = hex($sz);
+      next if $size <= 0;
+      $n =~ tr/;/:/;                      # keep folded frame separator clean
+      push @lo, $start; push @hi, $start + $size; push @nm, $n;
+    }
+    close $m;
+    my @ix = sort { $lo[$a] <=> $lo[$b] } 0..$#lo;
+    my @L = map { $lo[$_] } @ix; my @H = map { $hi[$_] } @ix; my @N = map { $nm[$_] } @ix;
+    sub resolve {
+      my $a = shift; my ($x, $y) = (0, $#L);
+      while ($x <= $y) { my $k = int(($x + $y) / 2);
+        if ($a < $L[$k]) { $y = $k - 1 } elsif ($a >= $H[$k]) { $x = $k + 1 } else { return $N[$k] } }
+      return undef;
+    }
+    while (my $line = <STDIN>) {
+      chomp $line;
+      unless ($line =~ /^(.*)\s+(\d+)$/) { print "$line\n"; next; }
+      my ($stack, $cnt) = ($1, $2);
+      my @f = split /;/, $stack;
+      for my $fr (@f) { if ($fr =~ /^0x([0-9a-fA-F]+)$/) { my $s = resolve(hex($1)); $fr = $s if defined $s; } }
+      print join(";", @f) . " $cnt\n";
+    }
+  ' "$PERFMAP"
 }
 
 # Convert `memleak --combined-only` text into byte-weighted folded stacks.
@@ -216,7 +258,9 @@ case "$CAPTURE_TYPE" in
       BT="$ARTIFACTS/alloc-${KIND}-bytes.bt"
       [[ -s "$BT" ]] || continue
       if [[ -f "$FG_DIR/stackcollapse-bpftrace.pl" ]]; then
-        "$FG_DIR/stackcollapse-bpftrace.pl" "$BT" 2>/dev/null | _collapse_native \
+        # stackcollapse → resolve JIT/managed hex via perfmap → fold native to [native]
+        "$FG_DIR/stackcollapse-bpftrace.pl" "$BT" 2>/dev/null \
+          | _symbolize_perfmap "$PERFMAP" | _collapse_native \
           > "$ARTIFACTS/alloc-${KIND}-bytes.folded" || true
         [[ -s "$ARTIFACTS/alloc-${KIND}-bytes.folded" ]] && \
           SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-${KIND}-bytes.folded" "alloc-${KIND}-bytes" mem bytes \
