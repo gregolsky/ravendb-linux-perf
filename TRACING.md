@@ -182,9 +182,10 @@ Outputs — three complementary views (all byte-aware where it matters):
   `rvn_allocate_more_space` (the new *total* mapping length). `max`, not `sum`, because it re-maps
   the whole file on each grow, so summing the cumulative totals would over-count; the true delta
   (bytes added) lives only in managed Voron. Shows the peak size each path grew a mapping to.
-- **`alloc-malloc` / `alloc-mmap` / `alloc-rvn` — CALL COUNT** (`stackcount -f`): width ∝ *number of
-  allocation/grow calls* (churn). Clearly titled "not size". malloc/mmap counts appear only as the
-  fallback when `bpftrace` is absent; the `rvn` count always accompanies its peak-size flame.
+- **`alloc-malloc` / `alloc-mmap` / `alloc-rvn` — CALL COUNT** (`stackcount -f`, always captured):
+  width ∝ *number of allocation/grow calls* (churn), titled "not size". **Every type produces both
+  a byte flame and a call-count flame** (bytes need `bpftrace`; counts are always there and, via bcc,
+  carry the best on-box managed symbolization).
 - **`memleak.txt`** — raw top-stacks-by-held-bytes text.
 
 All byte flames label in **human units** (MB for large flames, KB for small — e.g. a ~3 MB held

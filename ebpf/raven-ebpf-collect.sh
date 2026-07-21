@@ -381,27 +381,28 @@ do_capture() {
       # Fallback: let bpftrace resolve the library by name if the maps scan missed it.
       if [[ -z "$LIBC" && -n "$BPFTRACE" ]]; then LIBC="libc"; fi
 
-      info "eBPF native-allocation tracing (PID $HOST_PID) ..."
+      info "eBPF native-allocation tracing (PID $HOST_PID) — count + byte flames per type."
+      info "  runs several sequential probes; keep --duration short (10–15s) on a busy server."
 
-      # BYTES (primary): allocation VOLUME — sum of the requested size per stack.
-      # stackcount can only count events, so byte-weighting needs bpftrace summing
-      # the size arg (malloc arg0, mmap length arg1). Falls back to call-count flames.
+      # CALL COUNT (always): bcc stackcount. Runs in user context and symbolizes
+      # managed frames on-box from the perfmap, giving deep, well-named stacks.
+      _capture "$ARTIFACTS/alloc-malloc.folded" "[calls] malloc sites" \
+        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:malloc
+      _apply_perfmap "$ARTIFACTS/alloc-malloc.folded"
+      _capture "$ARTIFACTS/alloc-mmap.folded" "[calls] mmap64 sites" \
+        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:mmap64
+      _apply_perfmap "$ARTIFACTS/alloc-mmap.folded"
+
+      # BYTE VOLUME (sum of the requested size per stack): stackcount can only count
+      # events, so this needs bpftrace summing the size arg (malloc arg0, mmap len arg1).
       if [[ -n "$BPFTRACE" && -n "$LIBC" ]]; then
         _capture "$ARTIFACTS/alloc-malloc-bytes.bt" "[bytes] malloc volume (bpftrace sum)" \
           "$BPFTRACE" -p "$HOST_PID" -e "uprobe:${LIBC}:malloc { @[ustack] = sum(arg0); } interval:s:${DURATION} { exit(); }"
-        ok "alloc-malloc-bytes.bt: $(wc -l < "$ARTIFACTS/alloc-malloc-bytes.bt") lines"
         _capture "$ARTIFACTS/alloc-mmap-bytes.bt" "[bytes] mmap volume (bpftrace sum)" \
           "$BPFTRACE" -p "$HOST_PID" -e "uprobe:${LIBC}:mmap64 { @[ustack] = sum(arg1); } interval:s:${DURATION} { exit(); }"
-        ok "alloc-mmap-bytes.bt: $(wc -l < "$ARTIFACTS/alloc-mmap-bytes.bt") lines"
       else
-        warn "bpftrace not found (or libc unresolved) — byte-VOLUME flames need it; capturing call-count instead."
+        warn "bpftrace not found (or libc unresolved) — byte-volume flames skipped (call-count still captured)."
         warn "  install: apt-get install bpftrace"
-        _capture "$ARTIFACTS/alloc-malloc.folded" "[calls] malloc sites" \
-          timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:malloc
-        _apply_perfmap "$ARTIFACTS/alloc-malloc.folded"
-        _capture "$ARTIFACTS/alloc-mmap.folded" "[calls] mmap sites" \
-          timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:mmap64
-        _apply_perfmap "$ARTIFACTS/alloc-mmap.folded"
       fi
 
       # Voron file-mapping growth (best-effort). rvn_allocate_more_space's first

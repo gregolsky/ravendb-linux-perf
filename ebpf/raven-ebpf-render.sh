@@ -305,7 +305,7 @@ case "$CAPTURE_TYPE" in
           "RavenDB native memory HELD - outstanding | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
       fi
     fi
-    # CALL-COUNT fallback (present only when bpftrace was unavailable at capture).
+    # CALL COUNT (always captured): one flame per type, weighted by number of calls.
     for KIND in malloc mmap rvn; do
       RAW="$ARTIFACTS/alloc-${KIND}.folded"
       [[ -s "$RAW" ]] || continue
