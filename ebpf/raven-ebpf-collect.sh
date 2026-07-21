@@ -133,11 +133,25 @@ _capture() {
   info "  $LABEL"
   "$@" > "$OUT" 2>/dev/null &
   local CPID=$! LEFT="$DURATION"
-  while kill -0 "$CPID" 2>/dev/null; do
+  while kill -0 "$CPID" 2>/dev/null && [[ "$LEFT" -gt 0 ]]; do
     printf "\r      %-34s %2ds " "$LABEL" "$LEFT" >&2
-    [[ "$LEFT" -le 0 ]] && break
     sleep 1; LEFT=$((LEFT-1))
   done
+  # Hard runtime ceiling: every probe is meant to self-terminate at $DURATION.
+  # If one hasn't after a short grace, stop it — SIGINT (clean detach), then
+  # SIGKILL — so a capture can NEVER run away or hang on a production box. The
+  # kernel releases the eBPF uprobes when the process dies, so a force-kill
+  # leaves no lingering instrumentation behind.
+  local GRACE=15
+  while kill -0 "$CPID" 2>/dev/null && [[ "$GRACE" -gt 0 ]]; do sleep 1; GRACE=$((GRACE-1)); done
+  if kill -0 "$CPID" 2>/dev/null; then
+    warn "capture still running after $((DURATION + 15))s — sending SIGINT"
+    kill -INT "$CPID" 2>/dev/null || true; sleep 3
+  fi
+  if kill -0 "$CPID" 2>/dev/null; then
+    warn "capture ignored SIGINT — sending SIGKILL (uprobes auto-removed by kernel)"
+    kill -KILL "$CPID" 2>/dev/null || true
+  fi
   wait "$CPID" 2>/dev/null || true
   printf "\r%*s\r" 55 "" >&2
 }

@@ -131,6 +131,74 @@ The **knobs** are cheap; the **sampling method** is where the real cost is.
 
 ---
 
+## Production safety
+
+Running these collectors against a live production RavenDB is designed to be safe, but
+**no profiler is zero-impact** — be honest about which capture you run and for how long.
+
+### What the collectors do and don't do
+
+- **A normal capture (`--service` / `--pid`) is read-only w.r.t. the system and RavenDB.**
+  It reads `/proc`, attaches kernel-mediated probes, and writes only its own bundle (temp dir
+  or `--output`). It does **not** write RavenDB data, restart/stop the process, or change any
+  config. The temp dir is removed on exit (`trap`).
+- **eBPF is kernel-verified and can't crash the kernel.** uprobes/tracepoints detach on normal
+  exit, on `Ctrl-C` (SIGINT), and even on SIGKILL — the kernel releases the BPF links when the
+  tool process dies, so **no instrumentation is ever left attached** to RavenDB.
+- **Every capture is time-bounded** by `--duration`, with a hard runtime ceiling in the
+  collector (`_capture`): if a probe fails to self-terminate it is SIGINT-ed then SIGKILL-ed, so
+  a capture can never run away or hang the box.
+- The **worst case is transient CPU/latency overhead during the capture window**, not a crash,
+  data change, or lingering state.
+
+### Per-type overhead (lowest → highest)
+
+| `--type` | Mechanism | Overhead | Prod guidance |
+|---|---|---|---|
+| `cpu` | timed sampling @99 Hz | ~1% | ✅ Safe; run freely (short windows) |
+| `runqlat` | sched tracepoints, in-kernel histogram | Very low | ✅ Safe |
+| `offcpu` / `offwake` | sched tracepoints, in-kernel aggregation | Low | ✅ Safe |
+| `io` | block tracepoints + `biosnoop` per-I/O | Low–medium | ✅ Safe; heavy only under extreme IOPS |
+| `faults` | `page_fault_user` tracepoint + user stack walk per fault | Medium | ⚠️ Fine for short windows; scales with fault rate |
+| `managed-alloc` | EventPipe GC events (verbose) | Medium | ⚠️ Scales with allocation rate; bounded to duration |
+| `alloc` | **uprobes on `malloc`/`mmap`** (stackcount + bpftrace) **+ `memleak`** | **Highest** | ⚠️ **Use with care** — see below |
+
+### `alloc` is the one to treat carefully
+
+It instruments `malloc`/`mmap` — very hot paths — with a **stack walk on every call**, via up to
+three tools (stackcount, bpftrace, memleak) run sequentially, and `memleak` additionally holds a
+map of outstanding allocations. On an allocation-heavy workload this adds **measurable CPU and
+latency for the duration of the capture**. RavenDB's arena pooling keeps the raw `malloc` rate
+moderate, which helps, but treat `alloc` as a deliberate, short, ideally off-peak capture
+(**5–15 s**), not something to leave running. All other types are much lighter.
+
+### Opt-in changes that are NOT part of a normal capture
+
+- **`--sysctl-fix`** changes **host-wide** kernel settings — `perf_event_paranoid=-1` and
+  `kptr_restrict=0` (security-relevant: lets any user profile and exposes kernel addresses) and
+  `sched_schedstats=1` (a tiny always-on scheduler cost). It is **opt-in**; without it the
+  collector just tells you what to change. `common/00-prereqs.sh --persist` additionally makes
+  these survive reboot. Revert with:
+  ```bash
+  sudo sysctl kernel.perf_event_paranoid=2 kernel.kptr_restrict=1 kernel.sched_schedstats=0
+  sudo rm -f /etc/sysctl.d/99-perf.conf     # if --persist was used
+  ```
+- **`DOTNET_EnableWriteXorExecute=0`** (set at RavenDB launch, not by the collector) removes a
+  JIT-hardening mitigation — weigh it for your threat model (see the knob section above).
+- **`--demo`** downloads, launches, and kills **its own** RavenDB — it is a POC helper. **Never
+  run `--demo` against a production server.**
+- **`--dwarf`** (perf engine) copies 64 KB of stack per sample — high CPU/IO; prefer the default
+  frame-pointer (`--fp`) capture in production.
+
+### Bottom line
+
+`cpu`, `offcpu`, `offwake`, `runqlat`, `io`, and `faults` are low-risk on production with short
+windows. `managed-alloc` and especially **`alloc`** cost more — run them briefly and deliberately.
+Nothing here modifies RavenDB or persists on the box (absent `--sysctl-fix`/`--persist`), and
+instrumentation always detaches when the tool exits.
+
+---
+
 ## Alternative profiling approaches
 
 ### In-runtime: EventPipe (`dotnet-trace`, `dotnet-monitor`)
