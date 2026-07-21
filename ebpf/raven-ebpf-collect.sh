@@ -374,8 +374,12 @@ do_capture() {
       local MEMLEAK;    MEMLEAK=$(find_bcc_tool memleak)
       local BPFTRACE;   BPFTRACE=$(command -v bpftrace 2>/dev/null || true)
       # Resolve the target's libc path from its maps (for bpftrace uprobe targets).
+      # Matches both modern `libc.so.6` and versioned `libc-2.31.so`, and skips
+      # libcrypto/libcurl/etc.
       local LIBC
-      LIBC=$(awk '/\/libc[.-][^ ]*\.so/{print $NF; exit}' "/proc/$HOST_PID/maps" 2>/dev/null || true)
+      LIBC=$(awk '$NF ~ /\/libc(-[0-9.]+)?\.so/ {print $NF; exit}' "/proc/$HOST_PID/maps" 2>/dev/null || true)
+      # Fallback: let bpftrace resolve the library by name if the maps scan missed it.
+      if [[ -z "$LIBC" && -n "$BPFTRACE" ]]; then LIBC="libc"; fi
 
       info "eBPF native-allocation tracing (PID $HOST_PID) ..."
 
