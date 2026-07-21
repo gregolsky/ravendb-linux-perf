@@ -182,7 +182,7 @@ Compared to `perf record`:
   (Parca server, Grafana Pyroscope) where you query over time.
 
 This toolkit uses bcc-tools for ad-hoc captures in `ebpf/raven-ebpf-collect.sh`,
-supporting six trace types:
+supporting seven trace types:
 
 | `--type` | bcc tool(s) | What it produces |
 |---|---|---|
@@ -191,7 +191,8 @@ supporting six trace types:
 | `offwake` | `offwaketime` | Off-CPU + waker stacks |
 | `io` | `biolatency` + `biosnoop` + `biostacks` + `ext4slower` + `cachestat` + `bitesize` | Block I/O suite |
 | `runqlat` | `runqlat` | Run-queue latency histogram |
-| `alloc` | `stackcount` (`c:malloc`, `c:mmap64`, `librvnpal:rvn_allocate_more_space`) + `memleak` | Native allocation-site folded stacks + outstanding-bytes report |
+| `alloc` | `stackcount` (`c:malloc`, `c:mmap64`, `librvnpal:rvn_allocate_more_space`) + `memleak` | Byte-weighted outstanding flame (from `memleak`) + call-count allocation-site folded stacks |
+| `faults` | `stackcount t:exceptions:page_fault_user` | Page-fault (RSS-growth) folded stacks |
 
 > **`alloc` overhead is higher than the others.** `cpu`/`offcpu`/`io`/`runqlat` sample or
 > hook a bounded set of events; `alloc` attaches **uprobes to `malloc`/`mmap64`**, which fire

@@ -20,7 +20,8 @@ See [OVERHEAD.md](OVERHEAD.md) for a deeper explanation of the two engines
 | **Block I/O** | `io` | Disk latency histogram, per-I/O trace, which code issues I/O, I/O sizes | perf (code-path) / eBPF (all) | Low–medium | ✅ |
 | **Filesystem** | `io` (eBPF) | Slow FS operations above a threshold (`ext4slower`/`fileslower`) | eBPF | Low | ✅ |
 | **Page cache** | `io` (eBPF) | Cache hit/miss ratio — is the working set in RAM? | eBPF | Low | ✅ |
-| **Native memory** | `alloc` | Where is *unmanaged* memory allocated from, and what's still held? | eBPF | Medium (uprobes) | ✅ |
+| **Native memory** | `alloc` | Where is *unmanaged* memory allocated from, and what's still held (bytes)? | eBPF | Medium (uprobes) | ✅ |
+| **Page faults** | `faults` | Where is the resident set (RSS) growing — first-touch of memory? | eBPF | Low (tracepoint) | ✅ |
 
 **Tip:** Use the **perf engine** for `cpu` (zero extra deps, works everywhere).
 Use the **eBPF engine** for everything else — in-kernel aggregation, lower overhead,
@@ -169,14 +170,25 @@ memory bottoms out on three different native symbols, so `alloc` probes all thre
 | 4 KB-aligned anon buffers (encryption / aligned I/O) | `PlatformSpecific.NativeMemory.Allocate4KbAlignedMemory` → `Syscall.mmap64` | `mmap64` | `libc.so.6` |
 | Voron data/journal/scratch file growth | Pagers → `Pal.rvn_allocate_more_space` | `rvn_allocate_more_space` | `librvnpal.linux.x64.so` |
 
-Two complementary outputs:
-- **`alloc-malloc` / `alloc-mmap` / `alloc-rvn` flamegraphs** (`stackcount -f`): width ∝
-  *number of allocation calls* per code path. Managed callers resolve via the same
-  `/tmp/perf-<pid>.map` side-channel as `cpu`. `mmap64` catches both the aligned-anon path
-  and (transitively) Voron file mappings; `alloc-rvn` isolates Voron file growth.
-- **`memleak.txt`** (`memleak --combined-only`): the top stacks by *bytes still outstanding*
-  (allocated and not yet freed) over the window — the leak / "who's holding memory" view that
-  the call-count flames don't give.
+Outputs (the renderer produces all of these):
+- **`alloc-outstanding-bytes` flamegraph (primary)** — width ∝ *bytes still held*
+  (outstanding = allocated and not yet freed), parsed from the `memleak` data. This is the
+  "how much native memory is held, and from where" view. Use this first.
+- **`alloc-malloc` / `alloc-mmap` / `alloc-rvn` flamegraphs (secondary)** (`stackcount -f`):
+  width ∝ *number of allocation calls* — the "how **often** each path allocates" view (churn).
+  Note this is **call count, not bytes** — a path doing many tiny `malloc`s looks large here
+  even if it holds little memory; cross-read with the byte-weighted flame above.
+- **`memleak.txt`** — the raw top-stacks-by-outstanding-bytes text.
+
+Managed callers resolve via the same `/tmp/perf-<pid>.map` side-channel as `cpu`. `mmap64`
+catches both the aligned-anon path and (transitively) Voron file mappings; `alloc-rvn` isolates
+Voron file growth.
+
+> **`[native]` frames:** managed frames symbolize, but stripped `libcoreclr`/`libc`/`libcrypto`
+> internals don't — the renderer collapses runs of these `[unknown]` frames into a single
+> `[native]` frame so the allocating **managed** path (e.g. `Sparrow.*`, `Raven.*`) stays
+> readable instead of a wall of `[unknown]`. For *managed*-heap allocation by type with clean
+> stacks, use **`managed-alloc`** (dotnet-trace) instead.
 
 > **Important — arena/pool caveat:** `Sparrow.NativeMemory` and `ByteStringContext` are
 > **arena allocators** that grab large blocks (4 KB–2 MB) up front, sub-allocate by pointer
@@ -202,6 +214,34 @@ Two complementary outputs:
 | Engine | Command |
 |---|---|
 | eBPF | `sudo bash ebpf/raven-ebpf-collect.sh --type alloc --service ravendb --duration 15` |
+
+Render: `bash ebpf/raven-ebpf-render.sh bundle.tgz`
+
+---
+
+### `faults` — Page-fault flamegraph (RSS growth)
+
+**Question:** "Where is my resident set (RSS) growing — which code paths first-touch memory?"
+
+A page fault fires when a userspace access needs a page mapped in (first write to freshly
+`mmap`ed heap/arena/Voron memory). Counting page faults by call stack shows exactly which code
+paths cause physical memory to be committed — the most direct "why is RSS climbing" signal.
+Captured with `stackcount -f t:exceptions:page_fault_user` (a tracepoint, so **low overhead** —
+no per-allocation uprobe). Width ∝ number of faults (≈ pages, ~4 KB each). Managed frames
+resolve via the perfmap; native runtime frames collapse to `[native]` as with `alloc`.
+
+**What to look for in RavenDB:**
+- `Voron.*` pager / `ArenaMemoryAllocator` towers → storage/arena memory being committed
+- `Sparrow.*` buffer paths → native buffer first-touch
+- Wide GC / `libcoreclr` (`[native]`) → managed heap growth committing pages
+
+**Relation to `alloc`:** `alloc` shows *virtual* allocation requests (malloc/mmap); `faults`
+shows *physical* commit (what actually grows RSS). A large `alloc` that is never touched won't
+fault; use `faults` to find real memory-footprint growth.
+
+| Engine | Command |
+|---|---|
+| eBPF | `sudo bash ebpf/raven-ebpf-collect.sh --type faults --service ravendb --duration 20` |
 
 Render: `bash ebpf/raven-ebpf-render.sh bundle.tgz`
 

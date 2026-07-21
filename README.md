@@ -1,5 +1,7 @@
 # RavenDB perf flamegraphs
 
+[![CI](https://github.com/gregolsky/ravendb-linux-perf/actions/workflows/ci.yml/badge.svg)](https://github.com/gregolsky/ravendb-linux-perf/actions/workflows/ci.yml)
+
 Brendan-Gregg-style flamegraphs from a live RavenDB server showing merged
 **managed .NET frames · RavenDB/Voron internals · libcoreclr/JIT/GC native frames · kernel stacks**.
 
@@ -43,7 +45,8 @@ Nothing heavy (inject, DWARF unwind, SVG render) runs on the DB host.
 | `io` | What is the disk doing? | ✅ code-path only | ✅ full suite |
 | `runqlat` | Waiting for a CPU? | ❌ | ✅ |
 | `offwake` | Who unblocked me? | ❌ | ✅ |
-| `alloc` | Where is native memory allocated / leaking? | ❌ | ✅ |
+| `alloc` | Where is native memory allocated / held (bytes)? | ❌ | ✅ |
+| `faults` | Where is RSS growing (page faults)? | ❌ | ✅ |
 
 **Tip:** use the **perf engine** for `cpu`; use the **eBPF engine** for everything else.
 
@@ -197,9 +200,13 @@ curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/e
 curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
   sudo bash -s -- --pid 12345 --type runqlat --duration 20 --nc renderer-host:9000
 
-# Native/unmanaged memory allocation sites + leak report (keep duration short — uprobes)
+# Native/unmanaged memory: byte-weighted (held) + allocation-site flames (keep duration short — uprobes)
 curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
   sudo bash -s -- --service ravendb --type alloc --duration 15 --nc renderer-host:9000
+
+# Page faults → where RSS is growing (low overhead)
+curl -fsSL https://raw.githubusercontent.com/gregolsky/ravendb-linux-perf/main/ebpf/raven-ebpf-collect.sh | \
+  sudo bash -s -- --service ravendb --type faults --duration 20 --nc renderer-host:9000
 ```
 
 ### Collect to a local file (no `nc`, no S3)
