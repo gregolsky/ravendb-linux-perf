@@ -120,10 +120,10 @@ BASENAME="${BUNDLE_FILE%.tgz}"; BASENAME="${BASENAME%.tar.gz}"; BASENAME="$(base
 mkdir -p "$OUTPUT_DIR"
 
 _render_flame() {
-  local FOLDED="$1" SUFFIX="$2" COLORS="${3:-java}" COUNTNAME="${4:-samples}"
+  local FOLDED="$1" SUFFIX="$2" COLORS="${3:-java}" COUNTNAME="${4:-samples}" TITLE="${5:-$FG_TITLE}"
   local SVG="$OUTPUT_DIR/${BASENAME}-${SUFFIX}-flame.svg"
   "$FG_DIR/flamegraph.pl" \
-    --title "$FG_TITLE" \
+    --title "$TITLE" \
     --colors "$COLORS" \
     --countname "$COUNTNAME" \
     --hash --width 1600 \
@@ -217,16 +217,18 @@ case "$CAPTURE_TYPE" in
       _memleak_to_folded < "$ARTIFACTS/memleak.txt" | _collapse_native \
         > "$ARTIFACTS/alloc-outstanding.folded"
       if [[ -s "$ARTIFACTS/alloc-outstanding.folded" ]]; then
-        SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-outstanding.folded" alloc-outstanding-bytes mem bytes)" )
+        SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-outstanding.folded" alloc-outstanding-bytes mem bytes \
+          "RavenDB native memory HELD - bytes outstanding | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
       fi
     fi
     # SECONDARY: call-count allocation-site flames (how *often* each path
-    # allocates), native noise collapsed to [native].
+    # allocates — NOT size), native noise collapsed to [native].
     for KIND in malloc mmap rvn; do
       RAW="$ARTIFACTS/alloc-${KIND}.folded"
       [[ -s "$RAW" ]] || continue
       _collapse_native < "$RAW" > "$ARTIFACTS/alloc-${KIND}-clean.folded"
-      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-${KIND}-clean.folded" "alloc-${KIND}" mem allocs)" )
+      SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-${KIND}-clean.folded" "alloc-${KIND}" mem calls \
+        "RavenDB ${KIND} - allocation CALL COUNT (not size) | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
     done
     _copy_text "$ARTIFACTS/memleak.txt"
     echo ""
