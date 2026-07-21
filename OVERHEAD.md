@@ -195,7 +195,7 @@ supporting seven trace types:
 | `offwake` | `offwaketime` | Off-CPU + waker stacks |
 | `io` | `biolatency` + `biosnoop` + `biostacks` + `ext4slower` + `cachestat` + `bitesize` | Block I/O suite |
 | `runqlat` | `runqlat` | Run-queue latency histogram |
-| `alloc` | `stackcount` (`c:malloc`, `c:mmap64`, `librvnpal:rvn_allocate_more_space`) + `memleak` | Byte-weighted outstanding flame (from `memleak`) + call-count allocation-site folded stacks |
+| `alloc` | `bpftrace` (sum malloc/mmap size → bytes) + `memleak` (held bytes) + `stackcount` (call-count fallback) | Byte-VOLUME flames (allocated) + byte-HELD flame (outstanding) + call-count fallback |
 | `faults` | `stackcount t:exceptions:page_fault_user` | Page-fault (RSS-growth) folded stacks |
 
 > **`alloc` overhead is higher than the others.** `cpu`/`offcpu`/`io`/`runqlat` sample or

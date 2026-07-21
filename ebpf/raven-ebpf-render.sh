@@ -210,9 +210,22 @@ case "$CAPTURE_TYPE" in
     ;;
 
   alloc)
-    # PRIMARY: byte-weighted flame of *outstanding* native memory, parsed from
-    # memleak.txt (weighted by bytes still held, not call count). This answers
-    # "how much native memory is held, and from where".
+    # BYTES (volume): total bytes ALLOCATED per path, from bpftrace sum(size).
+    # This is the "what path allocated the most memory" view — widest tower wins.
+    for KIND in malloc mmap; do
+      BT="$ARTIFACTS/alloc-${KIND}-bytes.bt"
+      [[ -s "$BT" ]] || continue
+      if [[ -f "$FG_DIR/stackcollapse-bpftrace.pl" ]]; then
+        "$FG_DIR/stackcollapse-bpftrace.pl" "$BT" 2>/dev/null | _collapse_native \
+          > "$ARTIFACTS/alloc-${KIND}-bytes.folded" || true
+        [[ -s "$ARTIFACTS/alloc-${KIND}-bytes.folded" ]] && \
+          SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-${KIND}-bytes.folded" "alloc-${KIND}-bytes" mem bytes \
+            "RavenDB ${KIND} - bytes ALLOCATED / volume | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
+      else
+        warn "stackcollapse-bpftrace.pl missing from FlameGraph — cannot render ${KIND} byte-volume flame"
+      fi
+    done
+    # BYTES (held): outstanding allocations still held, from memleak.
     if [[ -s "$ARTIFACTS/memleak.txt" ]]; then
       _memleak_to_folded < "$ARTIFACTS/memleak.txt" | _collapse_native \
         > "$ARTIFACTS/alloc-outstanding.folded"
@@ -221,8 +234,7 @@ case "$CAPTURE_TYPE" in
           "RavenDB native memory HELD - bytes outstanding | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
       fi
     fi
-    # SECONDARY: call-count allocation-site flames (how *often* each path
-    # allocates — NOT size), native noise collapsed to [native].
+    # CALL-COUNT fallback (present only when bpftrace was unavailable at capture).
     for KIND in malloc mmap rvn; do
       RAW="$ARTIFACTS/alloc-${KIND}.folded"
       [[ -s "$RAW" ]] || continue
@@ -234,8 +246,8 @@ case "$CAPTURE_TYPE" in
     echo ""
     echo "── Top outstanding native allocations (memleak, by bytes) ──"
     [[ -f "$ARTIFACTS/memleak.txt" ]] && head -40 "$ARTIFACTS/memleak.txt" || \
-      warn "no memleak.txt in bundle (memleak unavailable at capture time — byte-weighted flame skipped)"
-    if [[ ! -s "$ARTIFACTS/memleak.txt" && ! -s "$ARTIFACTS/alloc-malloc.folded" ]]; then
+      warn "no memleak.txt in bundle (byte-held flame skipped)"
+    if [[ ! -s "$ARTIFACTS/memleak.txt" && ! -s "$ARTIFACTS/alloc-malloc-bytes.bt" && ! -s "$ARTIFACTS/alloc-malloc.folded" ]]; then
       warn "no allocation data — nothing allocated in the window, or the target was idle."
       warn "Try a longer --duration under load."
     fi

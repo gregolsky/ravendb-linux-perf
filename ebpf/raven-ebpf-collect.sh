@@ -372,44 +372,54 @@ do_capture() {
       # peak uprobe overhead; --duration applies per probe.
       local STACKCOUNT; STACKCOUNT=$(need_bcc stackcount)
       local MEMLEAK;    MEMLEAK=$(find_bcc_tool memleak)
+      local BPFTRACE;   BPFTRACE=$(command -v bpftrace 2>/dev/null || true)
+      # Resolve the target's libc path from its maps (for bpftrace uprobe targets).
+      local LIBC
+      LIBC=$(awk '/\/libc[.-][^ ]*\.so/{print $NF; exit}' "/proc/$HOST_PID/maps" 2>/dev/null || true)
 
-      info "eBPF native-allocation tracing (PID $HOST_PID) — sequential probes, ~$((DURATION * 4))s total ..."
+      info "eBPF native-allocation tracing (PID $HOST_PID) ..."
 
-      # 1. malloc allocation sites (the bulk: arena/heap churn)
-      _capture "$ARTIFACTS/alloc-malloc.folded" "[1/4] malloc allocation sites" \
-        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:malloc
-      _apply_perfmap "$ARTIFACTS/alloc-malloc.folded"
-      ok "alloc-malloc.folded: $(wc -l < "$ARTIFACTS/alloc-malloc.folded") stacks"
+      # BYTES (primary): allocation VOLUME — sum of the requested size per stack.
+      # stackcount can only count events, so byte-weighting needs bpftrace summing
+      # the size arg (malloc arg0, mmap length arg1). Falls back to call-count flames.
+      if [[ -n "$BPFTRACE" && -n "$LIBC" ]]; then
+        _capture "$ARTIFACTS/alloc-malloc-bytes.bt" "[bytes] malloc volume (bpftrace sum)" \
+          "$BPFTRACE" -p "$HOST_PID" -e "uprobe:${LIBC}:malloc { @[ustack] = sum(arg0); } interval:s:${DURATION} { exit(); }"
+        ok "alloc-malloc-bytes.bt: $(wc -l < "$ARTIFACTS/alloc-malloc-bytes.bt") lines"
+        _capture "$ARTIFACTS/alloc-mmap-bytes.bt" "[bytes] mmap volume (bpftrace sum)" \
+          "$BPFTRACE" -p "$HOST_PID" -e "uprobe:${LIBC}:mmap64 { @[ustack] = sum(arg1); } interval:s:${DURATION} { exit(); }"
+        ok "alloc-mmap-bytes.bt: $(wc -l < "$ARTIFACTS/alloc-mmap-bytes.bt") lines"
+      else
+        warn "bpftrace not found (or libc unresolved) — byte-VOLUME flames need it; capturing call-count instead."
+        warn "  install: apt-get install bpftrace"
+        _capture "$ARTIFACTS/alloc-malloc.folded" "[calls] malloc sites" \
+          timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:malloc
+        _apply_perfmap "$ARTIFACTS/alloc-malloc.folded"
+        _capture "$ARTIFACTS/alloc-mmap.folded" "[calls] mmap sites" \
+          timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:mmap64
+        _apply_perfmap "$ARTIFACTS/alloc-mmap.folded"
+      fi
 
-      # 2. mmap64 allocation sites (aligned anon buffers + Voron file mappings)
-      _capture "$ARTIFACTS/alloc-mmap.folded" "[2/4] mmap64 allocation sites" \
-        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:mmap64
-      _apply_perfmap "$ARTIFACTS/alloc-mmap.folded"
-      ok "alloc-mmap.folded: $(wc -l < "$ARTIFACTS/alloc-mmap.folded") stacks"
-
-      # 3. Voron file-mapping growth, isolated (best-effort; needs librvnpal in maps).
-      #    maps is read at the HOST pid; the .so path inside it is container-internal,
-      #    so reach the actual file via CONTAINER_ROOT (empty for non-container targets).
+      # Voron file-mapping growth, isolated (best-effort, call-count).
       local RVNPAL
       RVNPAL=$(awk '/librvnpal.*\.so/{print $NF; exit}' "/proc/$HOST_PID/maps" 2>/dev/null || true)
       if [[ -n "$RVNPAL" && -f "${CONTAINER_ROOT}${RVNPAL}" ]]; then
-        _capture "$ARTIFACTS/alloc-rvn.folded" "[3/4] Voron ${RVNPAL##*/}:rvn_allocate_more_space" \
+        _capture "$ARTIFACTS/alloc-rvn.folded" "[calls] Voron ${RVNPAL##*/}:rvn_allocate_more_space" \
           timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" \
           "${CONTAINER_ROOT}${RVNPAL}:rvn_allocate_more_space"
         _apply_perfmap "$ARTIFACTS/alloc-rvn.folded"
-        ok "alloc-rvn.folded: $(wc -l < "$ARTIFACTS/alloc-rvn.folded") stacks"
       else
-        warn "  [3/4] librvnpal not found in /proc/$HOST_PID/maps — skipping Voron rvn_* probe"
+        warn "librvnpal not found in /proc/$HOST_PID/maps — skipping Voron rvn_* probe"
       fi
 
-      # 4. Outstanding / leak report (bytes-weighted; best-effort). memleak self-terminates
-      #    after DURATION (interval=DURATION count=1), so no timeout wrapper is needed.
+      # BYTES (held): outstanding allocations by bytes still held (memleak). memleak
+      # self-terminates after DURATION (interval=DURATION count=1); no timeout needed.
       if [[ -n "$MEMLEAK" ]]; then
-        _capture "$ARTIFACTS/memleak.txt" "[4/4] outstanding allocations (memleak)" \
+        _capture "$ARTIFACTS/memleak.txt" "[bytes] outstanding / held (memleak)" \
           "$MEMLEAK" -p "$HOST_PID" -T 30 --combined-only "$DURATION" 1
         ok "memleak.txt: $(wc -l < "$ARTIFACTS/memleak.txt") lines"
       else
-        warn "  [4/4] memleak not found (install bpfcc-tools) — skipping outstanding-bytes report"
+        warn "memleak not found (install bpfcc-tools) — skipping held-bytes report"
       fi
       ;;
 
@@ -421,8 +431,11 @@ do_capture() {
       # (≈ pages, ~4 KB each). Low overhead (a tracepoint, not a uprobe).
       local STACKCOUNT; STACKCOUNT=$(need_bcc stackcount)
       info "eBPF page-fault profiling (PID $HOST_PID) ..."
+      # -U = user stacks only: attribute each fault to the RavenDB/managed code that
+      # touched the page, not the kernel fault handler (which would otherwise be the
+      # stack leaf and just add exc_page_fault→handle_mm_fault noise to every stack).
       _capture "$ARTIFACTS/faults.folded" "user page-faults" \
-        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" "t:exceptions:page_fault_user"
+        timeout -s INT "$DURATION" "$STACKCOUNT" -f -U -p "$HOST_PID" "t:exceptions:page_fault_user"
       _apply_perfmap "$ARTIFACTS/faults.folded"
       ok "faults.folded: $(wc -l < "$ARTIFACTS/faults.folded") stacks"
       ;;

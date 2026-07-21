@@ -19,14 +19,20 @@ bytes-weighted **outstanding/leak report** (`memleak`).
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y bpfcc-tools linux-headers-$(uname -r) perl git
+sudo apt-get install -y bpfcc-tools bpftrace linux-headers-$(uname -r) perl git
 sudo bash common/00-prereqs.sh        # sysctls, BTF check, clones FlameGraph
 
-# Confirm the two bcc tools the alloc type needs resolve:
-which stackcount-bpfcc memleak-bpfcc || ls /usr/share/bcc/tools/{stackcount,memleak}
+# Tools the alloc type uses:
+which bpftrace                                  # byte-VOLUME flames (bytes allocated)
+which memleak-bpfcc    || ls /usr/share/bcc/tools/memleak     # byte-HELD flame (outstanding)
+which stackcount-bpfcc || ls /usr/share/bcc/tools/stackcount  # call-count fallback
 ```
 
-`stackcount` is required; `memleak` is optional (only the leak report is skipped if absent).
+**`bpftrace`** drives the byte-weighted *volume* flames (sum of `malloc`/`mmap` sizes) — the
+"which path allocated the most memory" view. **`memleak`** gives the *held*-bytes flame. If
+`bpftrace` is absent the collector falls back to `stackcount` call-count flames (clearly labeled
+"not size"). None are strictly required, but with neither `bpftrace` nor `memleak` you get no
+byte view.
 
 ---
 
@@ -85,11 +91,12 @@ box) so there are allocations to trace.
 sudo bash ebpf/raven-ebpf-collect.sh --pid "$PID" --type alloc --duration 15 --output ./out
 ```
 
-Keep `--duration` short — the `malloc`/`mmap64` uprobes fire on every native allocation.
-The collector runs its four probes sequentially, so expect ~4×duration wall-clock.
+Keep `--duration` short — the `malloc`/`mmap64` probes fire on every native allocation.
+The collector runs its probes sequentially, so expect a few ×duration wall-clock.
 
 (`--service ravendb` or `--docker <name>` work too; Docker resolves the container-internal
-PID and `librvnpal` path automatically.)
+PID and `librvnpal` path automatically. Note: in `--docker`, managed frames may show as
+`[native]` — see the container caveat in the README.)
 
 ---
 
@@ -104,16 +111,23 @@ bash ebpf/raven-ebpf-render.sh out/raven-ebpf-alloc-*.tgz --output-dir ./out
 ## 4. Checks
 
 ```bash
-# Artifacts exist
+# Artifacts exist. The key memory flames:
+#   *-alloc-malloc-bytes-flame.svg / *-alloc-mmap-bytes-flame.svg  → bytes ALLOCATED (volume, bpftrace)
+#   *-alloc-outstanding-bytes-flame.svg                            → bytes HELD (memleak)
+#   *-alloc-malloc-flame.svg (only if bpftrace was absent)         → call count (fallback)
 ls -la out/*alloc*-flame.svg out/*.folded out/memleak.txt
 
-# Managed frames resolved in the malloc flame (expect a count > 0)
-grep -Ec 'Raven\.|Sparrow\.|Voron\.' out/*alloc-malloc*.folded
+# "Which path allocated the most memory?" → widest tower in the byte-VOLUME flame;
+# top line of the folded is the biggest single path:
+sort -t' ' -k2 -nr out/*alloc-malloc-bytes.folded 2>/dev/null | head -3
+
+# Managed frames resolved somewhere (expect > 0)
+grep -Ehc 'Raven\.|Sparrow\.|Voron\.' out/*alloc*.folded
 
 # W^X knob working: no doublemapper frames (expect 0)
 grep -c 'memfd:doublemapper' out/*.folded
 
-# Outstanding native allocations by stack (bytes)
+# Held native allocations by stack (bytes)
 head -40 out/memleak.txt
 ```
 

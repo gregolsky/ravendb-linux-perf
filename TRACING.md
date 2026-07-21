@@ -171,15 +171,17 @@ memory bottoms out on three different native symbols, so `alloc` probes all thre
 | 4 KB-aligned anon buffers (encryption / aligned I/O) | `PlatformSpecific.NativeMemory.Allocate4KbAlignedMemory` → `Syscall.mmap64` | `mmap64` | `libc.so.6` |
 | Voron data/journal/scratch file growth | Pagers → `Pal.rvn_allocate_more_space` | `rvn_allocate_more_space` | `librvnpal.linux.x64.so` |
 
-Outputs (the renderer produces all of these):
-- **`alloc-outstanding-bytes` flamegraph (primary)** — width ∝ *bytes still held*
-  (outstanding = allocated and not yet freed), parsed from the `memleak` data. This is the
-  "how much native memory is held, and from where" view. Use this first.
-- **`alloc-malloc` / `alloc-mmap` / `alloc-rvn` flamegraphs (secondary)** (`stackcount -f`):
-  width ∝ *number of allocation calls* — the "how **often** each path allocates" view (churn).
-  Note this is **call count, not bytes** — a path doing many tiny `malloc`s looks large here
-  even if it holds little memory; cross-read with the byte-weighted flame above.
-- **`memleak.txt`** — the raw top-stacks-by-outstanding-bytes text.
+Outputs — three complementary views (all byte-aware where it matters):
+- **`alloc-malloc-bytes` / `alloc-mmap-bytes` — bytes ALLOCATED (volume).** `bpftrace` sums the
+  requested size per stack (`malloc` arg0, `mmap` length); width ∝ total bytes requested.
+  **This is the "what path allocated the most memory" view — the widest tower wins.** Requires
+  `bpftrace` on the box.
+- **`alloc-outstanding-bytes` — bytes HELD.** From `memleak`; width ∝ bytes still outstanding
+  (allocated and not freed) — the leak / current-footprint view.
+- **`alloc-malloc` / `alloc-mmap` / `alloc-rvn` — CALL COUNT** (`stackcount -f`; the fallback used
+  only when `bpftrace` is absent): width ∝ *number of allocation calls* (churn). Clearly titled
+  "not size" — a path doing many tiny `malloc`s looks large here even if it holds little memory.
+- **`memleak.txt`** — raw top-stacks-by-held-bytes text.
 
 Managed callers resolve via the same `/tmp/perf-<pid>.map` side-channel as `cpu`. `mmap64`
 catches both the aligned-anon path and (transitively) Voron file mappings; `alloc-rvn` isolates
