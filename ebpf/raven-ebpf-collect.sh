@@ -117,6 +117,24 @@ need_bcc() {
   echo "$CMD"
 }
 
+# ─── Progress helper ─────────────────────────────────────────────────────────
+# Run a capture command (stdout → outfile) in the background with a live 1-second
+# countdown on stderr, so a multi-second silent capture visibly progresses.
+# Usage: _capture <outfile> <label> <cmd...>
+_capture() {
+  local OUT="$1" LABEL="$2"; shift 2
+  info "  $LABEL"
+  "$@" > "$OUT" 2>/dev/null &
+  local CPID=$! LEFT="$DURATION"
+  while kill -0 "$CPID" 2>/dev/null; do
+    printf "\r      %-34s %2ds " "$LABEL" "$LEFT" >&2
+    [[ "$LEFT" -le 0 ]] && break
+    sleep 1; LEFT=$((LEFT-1))
+  done
+  wait "$CPID" 2>/dev/null || true
+  printf "\r%*s\r" 55 "" >&2
+}
+
 # ─── Relaunch-hint block ────────────────────────────────────────────────────
 print_relaunch_hint() {
   cat >&2 <<EOF
@@ -230,7 +248,7 @@ check_process_env() {
     ok "DOTNET_EnableWriteXorExecute=0"
   fi
 
-  [[ "$MISSING" -eq 1 ]] && print_relaunch_hint
+  if [[ "$MISSING" -eq 1 ]]; then print_relaunch_hint; fi
 }
 
 # ─── 4. Side-channel preflight ──────────────────────────────────────────────
@@ -251,8 +269,8 @@ do_capture() {
 
     cpu)
       local PROFILE; PROFILE=$(need_bcc profile)
-      info "eBPF on-CPU sampling for ${DURATION}s at ${FREQ}Hz (PID $HOST_PID) ..."
-      "$PROFILE" -F "$FREQ" -adf -p "$HOST_PID" "$DURATION" > "$ARTIFACTS/cpu.folded"
+      _capture "$ARTIFACTS/cpu.folded" "on-CPU sampling ${FREQ}Hz (PID $HOST_PID)" \
+        "$PROFILE" -F "$FREQ" -adf -p "$HOST_PID" "$DURATION"
       # Symbolize managed frames from perfmap
       _apply_perfmap "$ARTIFACTS/cpu.folded"
       ok "cpu.folded: $(wc -l < "$ARTIFACTS/cpu.folded") samples"
@@ -260,16 +278,16 @@ do_capture() {
 
     offcpu)
       local OFFCPU; OFFCPU=$(need_bcc offcputime)
-      info "eBPF off-CPU sampling for ${DURATION}s (PID $HOST_PID) ..."
-      "$OFFCPU" -df -p "$HOST_PID" "$DURATION" > "$ARTIFACTS/offcpu.folded"
+      _capture "$ARTIFACTS/offcpu.folded" "off-CPU sampling (PID $HOST_PID)" \
+        "$OFFCPU" -df -p "$HOST_PID" "$DURATION"
       _apply_perfmap "$ARTIFACTS/offcpu.folded"
       ok "offcpu.folded: $(wc -l < "$ARTIFACTS/offcpu.folded") samples"
       ;;
 
     offwake)
       local OFFWAKE; OFFWAKE=$(need_bcc offwaketime)
-      info "eBPF off-wake sampling for ${DURATION}s (PID $HOST_PID) ..."
-      "$OFFWAKE" -df -p "$HOST_PID" "$DURATION" > "$ARTIFACTS/offwake.folded"
+      _capture "$ARTIFACTS/offwake.folded" "off-wake sampling (PID $HOST_PID)" \
+        "$OFFWAKE" -df -p "$HOST_PID" "$DURATION"
       _apply_perfmap "$ARTIFACTS/offwake.folded"
       ok "offwake.folded: $(wc -l < "$ARTIFACTS/offwake.folded") samples"
       ;;
@@ -343,19 +361,17 @@ do_capture() {
       local STACKCOUNT; STACKCOUNT=$(need_bcc stackcount)
       local MEMLEAK;    MEMLEAK=$(find_bcc_tool memleak)
 
-      info "eBPF native-allocation tracing (PID $HOST_PID); ${DURATION}s per probe ..."
+      info "eBPF native-allocation tracing (PID $HOST_PID) — sequential probes, ~$((DURATION * 4))s total ..."
 
       # 1. malloc allocation sites (the bulk: arena/heap churn)
-      info "  [1/4] stackcount c:malloc ..."
-      timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:malloc \
-        > "$ARTIFACTS/alloc-malloc.folded" 2>/dev/null || true
+      _capture "$ARTIFACTS/alloc-malloc.folded" "[1/4] malloc allocation sites" \
+        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:malloc
       _apply_perfmap "$ARTIFACTS/alloc-malloc.folded"
       ok "alloc-malloc.folded: $(wc -l < "$ARTIFACTS/alloc-malloc.folded") stacks"
 
       # 2. mmap64 allocation sites (aligned anon buffers + Voron file mappings)
-      info "  [2/4] stackcount c:mmap64 ..."
-      timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:mmap64 \
-        > "$ARTIFACTS/alloc-mmap.folded" 2>/dev/null || true
+      _capture "$ARTIFACTS/alloc-mmap.folded" "[2/4] mmap64 allocation sites" \
+        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" c:mmap64
       _apply_perfmap "$ARTIFACTS/alloc-mmap.folded"
       ok "alloc-mmap.folded: $(wc -l < "$ARTIFACTS/alloc-mmap.folded") stacks"
 
@@ -365,21 +381,20 @@ do_capture() {
       local RVNPAL
       RVNPAL=$(awk '/librvnpal.*\.so/{print $NF; exit}' "/proc/$HOST_PID/maps" 2>/dev/null || true)
       if [[ -n "$RVNPAL" && -f "${CONTAINER_ROOT}${RVNPAL}" ]]; then
-        info "  [3/4] stackcount ${RVNPAL##*/}:rvn_allocate_more_space ..."
-        timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" \
-          "${CONTAINER_ROOT}${RVNPAL}:rvn_allocate_more_space" \
-          > "$ARTIFACTS/alloc-rvn.folded" 2>/dev/null || true
+        _capture "$ARTIFACTS/alloc-rvn.folded" "[3/4] Voron ${RVNPAL##*/}:rvn_allocate_more_space" \
+          timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" \
+          "${CONTAINER_ROOT}${RVNPAL}:rvn_allocate_more_space"
         _apply_perfmap "$ARTIFACTS/alloc-rvn.folded"
         ok "alloc-rvn.folded: $(wc -l < "$ARTIFACTS/alloc-rvn.folded") stacks"
       else
         warn "  [3/4] librvnpal not found in /proc/$HOST_PID/maps — skipping Voron rvn_* probe"
       fi
 
-      # 4. Outstanding / leak report (bytes-weighted; best-effort)
+      # 4. Outstanding / leak report (bytes-weighted; best-effort). memleak self-terminates
+      #    after DURATION (interval=DURATION count=1), so no timeout wrapper is needed.
       if [[ -n "$MEMLEAK" ]]; then
-        info "  [4/4] memleak (outstanding allocations, ${DURATION}s) ..."
-        "$MEMLEAK" -p "$HOST_PID" -T 30 --combined-only "$DURATION" 1 \
-          > "$ARTIFACTS/memleak.txt" 2>/dev/null || true
+        _capture "$ARTIFACTS/memleak.txt" "[4/4] outstanding allocations (memleak)" \
+          "$MEMLEAK" -p "$HOST_PID" -T 30 --combined-only "$DURATION" 1
         ok "memleak.txt: $(wc -l < "$ARTIFACTS/memleak.txt") lines"
       else
         warn "  [4/4] memleak not found (install bpfcc-tools) — skipping outstanding-bytes report"

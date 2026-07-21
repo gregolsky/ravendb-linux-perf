@@ -269,7 +269,7 @@ check_process_env() {
     ok "DOTNET_ReadyToRun=0"
   fi
 
-  [[ "$MISSING" -eq 1 ]] && print_relaunch_hint "$HOST_PID"
+  if [[ "$MISSING" -eq 1 ]]; then print_relaunch_hint "$HOST_PID"; fi
 }
 
 # ─── 4. Side-channel preflight ──────────────────────────────────────────────
@@ -296,7 +296,7 @@ check_side_channel() {
     ok "jitdump: $JITDUMP ($(stat -c%s "$JITDUMP") bytes)"
     JITDUMP_SRC="$JITDUMP"
     # Also grab perfmap if available (for extra fallback symbol coverage)
-    [[ -s "$PERFMAP" ]] && PERFMAP_SRC="$PERFMAP"
+    if [[ -s "$PERFMAP" ]]; then PERFMAP_SRC="$PERFMAP"; fi
   fi
 }
 
