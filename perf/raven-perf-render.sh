@@ -75,10 +75,20 @@ if [[ ! -f "$FG_DIR/flamegraph.pl" ]]; then
     [[ -f "$TRY/flamegraph.pl" ]] && FG_DIR="$TRY" && break
   done
 fi
+# Repair a partial checkout (e.g. flamegraph.pl missing from an existing clone).
+if [[ ! -f "$FG_DIR/flamegraph.pl" && -d "$FG_DIR/.git" ]]; then
+  info "FlameGraph checkout incomplete — restoring from git ..."
+  git -C "$FG_DIR" checkout -- flamegraph.pl stackcollapse-perf.pl 2>/dev/null || true
+fi
 if [[ ! -f "$FG_DIR/flamegraph.pl" ]]; then
-  info "Cloning brendangregg/FlameGraph ..."
+  # git clone refuses a non-empty target dir; fall back to a fresh temp dir.
+  if [[ -d "$FG_DIR" && -n "$(ls -A "$FG_DIR" 2>/dev/null)" ]]; then
+    FG_DIR="$(mktemp -d)/FlameGraph"
+  fi
+  info "Cloning brendangregg/FlameGraph → $FG_DIR ..."
   git clone --depth 1 https://github.com/brendangregg/FlameGraph "$FG_DIR"
 fi
+[[ -f "$FG_DIR/flamegraph.pl" ]] || die "FlameGraph unavailable at $FG_DIR"
 ok "FlameGraph: $FG_DIR"
 
 # ─── Extract bundle ─────────────────────────────────────────────────────────
