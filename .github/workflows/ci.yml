@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck and bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bats
+
+      - name: ShellCheck (errors only)
+        # Style warnings are not gated yet; this catches real errors (bad syntax,
+        # undefined behavior). Tighten --severity over time.
+        run: shellcheck --severity=error common/*.sh perf/*.sh ebpf/*.sh
+
+      - name: Bats
+        # Exercises the arg parser, the check_process_env set -e regression
+        # (real /proc), and the renderers against fixture bundles — no perf/eBPF
+        # or RavenDB required.
+        run: bats --print-output-on-failure test/
