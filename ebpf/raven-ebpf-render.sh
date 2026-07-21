@@ -120,17 +120,34 @@ BASENAME="${BUNDLE_FILE%.tgz}"; BASENAME="${BASENAME%.tar.gz}"; BASENAME="$(base
 mkdir -p "$OUTPUT_DIR"
 
 _render_flame() {
-  local FOLDED="$1" SUFFIX="$2" COLORS="${3:-java}" COUNTNAME="${4:-samples}" TITLE="${5:-$FG_TITLE}"
+  local FOLDED="$1" SUFFIX="$2" COLORS="${3:-java}" COUNTNAME="${4:-samples}" TITLE="${5:-$FG_TITLE}" FACTOR="${6:-1}"
   local SVG="$OUTPUT_DIR/${BASENAME}-${SUFFIX}-flame.svg"
+  # --factor scales the DISPLAYED count (value × factor) without touching the
+  # widths, so byte flames can label in MB/KB with no loss of precision or stacks.
   "$FG_DIR/flamegraph.pl" \
     --title "$TITLE" \
     --colors "$COLORS" \
     --countname "$COUNTNAME" \
+    --factor "$FACTOR" \
     --hash --width 1600 \
     "$FOLDED" > "$SVG"
   ok "SVG: $SVG ($(du -sh "$SVG" | cut -f1))"
   cp "$FOLDED" "$OUTPUT_DIR/${BASENAME}-${SUFFIX}.folded"
   echo "$SVG"
+}
+
+# Render a byte-weighted folded file with a human-readable unit chosen from the
+# flame's total: MB for large flames, KB for small ones (so a ~3 MB flame isn't
+# all "0 MB"). Widths stay byte-precise; only the displayed unit scales.
+# Args: <folded> <suffix> <title>
+_render_bytes_flame() {
+  local FOLDED="$1" SUFFIX="$2" TITLE="$3"
+  local total cn fctr
+  total=$(awk '{s+=$NF} END{printf "%.0f", s+0}' "$FOLDED")
+  if   [[ "$total" -ge 134217728 ]]; then cn="MB"; fctr="0.00000095367431640625"
+  elif [[ "$total" -ge 131072    ]]; then cn="KB"; fctr="0.0009765625"
+  else                                    cn="bytes"; fctr="1"; fi
+  _render_flame "$FOLDED" "$SUFFIX" mem "$cn" "$TITLE" "$fctr"
 }
 
 # Collapse runs of unsymbolized native frames into a single [native] frame.
@@ -263,19 +280,29 @@ case "$CAPTURE_TYPE" in
           | _symbolize_perfmap "$PERFMAP" | _collapse_native \
           > "$ARTIFACTS/alloc-${KIND}-bytes.folded" || true
         [[ -s "$ARTIFACTS/alloc-${KIND}-bytes.folded" ]] && \
-          SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-${KIND}-bytes.folded" "alloc-${KIND}-bytes" mem bytes \
-            "RavenDB ${KIND} - bytes ALLOCATED / volume | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
+          SVGS+=( "$(_render_bytes_flame "$ARTIFACTS/alloc-${KIND}-bytes.folded" "alloc-${KIND}-bytes" \
+            "RavenDB ${KIND} - ALLOCATED / volume | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
       else
         warn "stackcollapse-bpftrace.pl missing from FlameGraph — cannot render ${KIND} byte-volume flame"
       fi
     done
+    # BYTES (peak): Voron per-path peak mapping size (bpftrace max of the new
+    # total length). See rvn_allocate_more_space — summing would over-count.
+    if [[ -s "$ARTIFACTS/alloc-rvn-bytes.bt" && -f "$FG_DIR/stackcollapse-bpftrace.pl" ]]; then
+      "$FG_DIR/stackcollapse-bpftrace.pl" "$ARTIFACTS/alloc-rvn-bytes.bt" 2>/dev/null \
+        | _symbolize_perfmap "$PERFMAP" | _collapse_native \
+        > "$ARTIFACTS/alloc-rvn-bytes.folded" || true
+      [[ -s "$ARTIFACTS/alloc-rvn-bytes.folded" ]] && \
+        SVGS+=( "$(_render_bytes_flame "$ARTIFACTS/alloc-rvn-bytes.folded" alloc-rvn-bytes \
+          "RavenDB Voron - PEAK mapping size per path (max) | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
+    fi
     # BYTES (held): outstanding allocations still held, from memleak.
     if [[ -s "$ARTIFACTS/memleak.txt" ]]; then
       _memleak_to_folded < "$ARTIFACTS/memleak.txt" | _collapse_native \
         > "$ARTIFACTS/alloc-outstanding.folded"
       if [[ -s "$ARTIFACTS/alloc-outstanding.folded" ]]; then
-        SVGS+=( "$(_render_flame "$ARTIFACTS/alloc-outstanding.folded" alloc-outstanding-bytes mem bytes \
-          "RavenDB native memory HELD - bytes outstanding | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
+        SVGS+=( "$(_render_bytes_flame "$ARTIFACTS/alloc-outstanding.folded" alloc-outstanding-bytes \
+          "RavenDB native memory HELD - outstanding | ${BUNDLE_HOST} ${BUNDLE_DATE}")" )
       fi
     fi
     # CALL-COUNT fallback (present only when bpftrace was unavailable at capture).

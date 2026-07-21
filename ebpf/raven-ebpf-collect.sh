@@ -404,14 +404,26 @@ do_capture() {
         _apply_perfmap "$ARTIFACTS/alloc-mmap.folded"
       fi
 
-      # Voron file-mapping growth, isolated (best-effort, call-count).
+      # Voron file-mapping growth (best-effort). rvn_allocate_more_space's first
+      # arg is the new TOTAL mapping length in bytes (page-aligned), and it re-maps
+      # the whole file — so we capture two views:
+      #   • call count (stackcount): how often each path grows a mapping
+      #   • peak size (bpftrace max(arg0)): the largest total each path grew to.
+      #     max() — NOT sum() — because summing the cumulative totals over repeated
+      #     grows would massively over-count. The true delta (bytes added) is only
+      #     known in managed Voron (_totalAllocationSize), not at the native arg.
       local RVNPAL
       RVNPAL=$(awk '/librvnpal.*\.so/{print $NF; exit}' "/proc/$HOST_PID/maps" 2>/dev/null || true)
       if [[ -n "$RVNPAL" && -f "${CONTAINER_ROOT}${RVNPAL}" ]]; then
-        _capture "$ARTIFACTS/alloc-rvn.folded" "[calls] Voron ${RVNPAL##*/}:rvn_allocate_more_space" \
+        local RVNLIB="${CONTAINER_ROOT}${RVNPAL}"
+        _capture "$ARTIFACTS/alloc-rvn.folded" "[calls] Voron rvn_allocate_more_space" \
           timeout -s INT "$DURATION" "$STACKCOUNT" -f -p "$HOST_PID" \
-          "${CONTAINER_ROOT}${RVNPAL}:rvn_allocate_more_space"
+          "${RVNLIB}:rvn_allocate_more_space"
         _apply_perfmap "$ARTIFACTS/alloc-rvn.folded"
+        if [[ -n "$BPFTRACE" ]]; then
+          _capture "$ARTIFACTS/alloc-rvn-bytes.bt" "[bytes] Voron peak mapping size (bpftrace max)" \
+            "$BPFTRACE" -p "$HOST_PID" -e "uprobe:${RVNLIB}:rvn_allocate_more_space { @[ustack] = max(arg0); } interval:s:${DURATION} { exit(); }"
+        fi
       else
         warn "librvnpal not found in /proc/$HOST_PID/maps — skipping Voron rvn_* probe"
       fi

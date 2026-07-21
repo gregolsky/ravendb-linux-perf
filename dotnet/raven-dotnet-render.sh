@@ -109,12 +109,18 @@ info "Converting .nettrace → byte-weighted folded stacks ..."
 dotnet "$CONV_DLL" "$NETTRACE" --summary "$SUMMARY" > "$FOLDED" || die "Converter failed."
 ok "folded: $(wc -l < "$FOLDED") stacks; summary: $SUMMARY"
 
+# Human-readable unit chosen from the flame total (MB for large, KB otherwise);
+# --factor scales the displayed label only, widths stay byte-precise.
+TOTAL=$(awk '{s+=$NF} END{printf "%.0f", s+0}' "$FOLDED")
+if   [[ "$TOTAL" -ge 134217728 ]]; then CN="MB"; FCTR="0.00000095367431640625"
+elif [[ "$TOTAL" -ge 131072    ]]; then CN="KB"; FCTR="0.0009765625"
+else                                    CN="bytes"; FCTR="1"; fi
 "$FG_DIR/flamegraph.pl" \
-  --title "$FG_TITLE (managed alloc, bytes)" \
-  --colors mem --countname bytes \
+  --title "$FG_TITLE (managed alloc)" \
+  --colors mem --countname "$CN" --factor "$FCTR" \
   --hash --width 1600 \
   "$FOLDED" > "$SVG"
-ok "SVG: $SVG ($(du -sh "$SVG" | cut -f1))"
+ok "SVG: $SVG ($(du -sh "$SVG" | cut -f1)); unit=$CN"
 
 echo ""
 echo "── Top managed allocations by type ─────────────────"
